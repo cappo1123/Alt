@@ -1,0 +1,2625 @@
+-- El Capo --
+
+--Restore point 4--
+
+local Config = {
+    MainAccount = "Ali736u1", 
+    Alts = {
+        ["ali736u6"] = true,
+        ["ahmed736u1"] = true,
+        ["ali736u4"] = true,
+        ["ahmed736u"] = true,
+        ["Ali736u12"] = true,
+        ["roblox_user_5535477487"] = true,
+        ["ali736u_ceohelper"] = true
+    },
+    Prefix = ";"
+}
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local LocalPlayer = Players.LocalPlayer
+
+-- Global states
+local CurrentMode = "none" -- "worm", "vform", "swarm", "mirror", "scatter"
+local CommandLeader = Config.MainAccount -- The person at the front of the chain
+local MyFollowTarget = nil -- The specific person THIs alt follows
+local MyIndex = 1
+local wasMoving = false
+local ScatterTarget = nil
+local TargetBreadcrumbs = {}
+local FOLLOW_DISTANCE = 3
+local TotalAlts = 0
+for _ in pairs(Config.Alts) do TotalAlts = TotalAlts + 1 end
+
+local SingleFlingTarget = nil
+
+-- ==========================================
+-- SHARED HELPERS
+-- ==========================================
+
+local function UpdateFollowTarget()
+    -- Build the chain: Leader -> sorted ACTIVE alts
+    local ordered = {CommandLeader}
+    local altNames = {}
+    
+    for name, _ in pairs(Config.Alts) do
+        if string.lower(name) ~= string.lower(CommandLeader) then
+            -- ONLY add them if they are actually in the server!
+            local actualName = nil
+            for _, p in ipairs(Players:GetPlayers()) do
+                if string.lower(p.Name) == string.lower(name) then
+                    actualName = p.Name
+                    break
+                end
+            end
+            if actualName then
+                table.insert(altNames, actualName)
+            end
+        end
+    end
+    table.sort(altNames)
+    
+    -- Dynamically update TotalAlts based on how many are actually here
+    TotalAlts = #altNames
+    
+    for i, name in ipairs(altNames) do
+        table.insert(ordered, name)
+    end
+    
+    for i, name in ipairs(ordered) do
+        if name == LocalPlayer.Name then
+            MyIndex = i
+            if i > 1 then
+                if MyFollowTarget ~= ordered[i - 1] then
+                    MyFollowTarget = ordered[i - 1]
+                    TargetBreadcrumbs = {} -- Clear history if target changes
+                end
+                return
+            end
+        end
+    end
+    MyFollowTarget = nil
+    TargetBreadcrumbs = {}
+end
+
+local function FindPlayer(searchStr)
+    searchStr = string.lower(searchStr)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if string.lower(p.Name) == searchStr or string.lower(p.DisplayName) == searchStr then
+            return p
+        end
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if string.find(string.lower(p.Name), searchStr, 1, true) or string.find(string.lower(p.DisplayName), searchStr, 1, true) then
+            return p
+        end
+    end
+    return nil
+end
+
+-- Save original HipHeight before any mode changes it (R6 = 0, R15 = 2)
+local OriginalHipHeight = 0
+do
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then OriginalHipHeight = hum.HipHeight end
+end
+
+local function StopAllActions()
+    CurrentMode = "none"
+    ScatterTarget = nil
+    TargetBreadcrumbs = {}
+    wasMoving = false
+
+    
+    local myCharacter = LocalPlayer.Character
+    if myCharacter then
+        for _, child in ipairs(myCharacter:GetChildren()) do
+            if child:IsA("BasePart") then
+                child.CanCollide = true
+            elseif child:IsA("Accessory") then
+                local handle = child:FindFirstChild("Handle")
+                if handle and handle:IsA("BasePart") then
+                    handle.CanCollide = true
+                end
+            end
+        end
+        local myRoot = myCharacter:FindFirstChild("HumanoidRootPart")
+        if myRoot then
+            myRoot.Anchored = false
+            -- Clean up any BodyPosition / BodyGyro / BodyAngularVelocity from special modes
+            for _, obj in ipairs(myRoot:GetChildren()) do
+                if obj:IsA("BodyPosition") or obj:IsA("BodyGyro") or obj.Name == "FlingSpin" then
+                    obj:Destroy()
+                end
+            end
+        end
+        local myHumanoid = myCharacter:FindFirstChildOfClass("Humanoid")
+        -- Stop moving
+        if myHumanoid and myRoot then
+            myHumanoid.PlatformStand = false
+            myHumanoid.WalkSpeed = 16 -- Reset walk speed
+            myHumanoid.HipHeight = OriginalHipHeight -- Restore original (tornado mode changes this)
+            myHumanoid.AutoRotate = true
+            myHumanoid:MoveTo(myRoot.Position)
+            myHumanoid:Move(Vector3.zero, false)
+            if myHumanoid:GetState() == Enum.HumanoidStateType.PlatformStanding then
+                myHumanoid:ChangeState(Enum.HumanoidStateType.Running)
+            end
+        end
+    end
+end
+
+-- ==========================================
+-- COMMAND PROCESSOR
+-- ==========================================
+
+local function ShowCommandsGUI()
+    local char = LocalPlayer.Character
+    local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+    if not head then return end
+
+    local existing = workspace:FindFirstChild("AltControllerCmdsDisplay")
+    if existing then
+        existing:Destroy()
+        return
+    end
+
+    local rayOrigin = workspace.CurrentCamera.CFrame.Position
+    local lookDir = workspace.CurrentCamera.CFrame.LookVector
+    local rayDirection = lookDir * 12
+
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = {char}
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local raycastResult = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+
+    local displayPos = rayOrigin + rayDirection
+    if raycastResult then
+        displayPos = raycastResult.Position - (lookDir * 0.2)
+    end
+
+    local part = Instance.new("Part")
+    part.Name = "AltControllerCmdsDisplay"
+    part.Anchored = true
+    part.CanCollide = false
+    part.Transparency = 1
+    part.Size = Vector3.new(7, 9, 0.1)
+    
+    local lookAtPos = workspace.CurrentCamera.CFrame.Position
+    part.CFrame = CFrame.lookAt(displayPos, Vector3.new(lookAtPos.X, displayPos.Y, lookAtPos.Z))
+    part.Parent = workspace
+
+    local surfaceGui = Instance.new("SurfaceGui")
+    surfaceGui.Face = Enum.NormalId.Front
+    surfaceGui.CanvasSize = Vector2.new(700, 900)
+    surfaceGui.LightInfluence = 0
+    surfaceGui.AlwaysOnTop = true
+    surfaceGui.Parent = part
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    frame.BackgroundTransparency = 0.2
+    frame.BorderSizePixel = 0
+    frame.Parent = surfaceGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 12)
+    corner.Parent = frame
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(80, 120, 200)
+    stroke.Thickness = 2
+    stroke.Parent = frame
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 50)
+    title.Position = UDim2.new(0, 0, 0, 10)
+    title.BackgroundTransparency = 1
+    title.Text = "ALT CONTROLLER COMMANDS"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 24
+    title.Parent = frame
+
+    local commandsText = "• jump - Make alts jump\n" ..
+                         "• stop - Stop all alt actions\n" ..
+                         "• reset - Respawns the alts\n" ..
+                         "• bring - Teleport alts to Main\n" ..
+                         "• worm [user] - Snake formation\n" ..
+                         "• vform / vshape [user] - V-formation\n" ..
+                         "• army [user] - 3-column march\n" ..
+                         "• flank [user] - Wide spread\n" ..
+                         "• circlein [user] - Circle inward\n" ..
+                         "• circleout [user] - Circle outward\n" ..
+                         "• spin [user] - Spinning circle\n" ..
+                         "• swarm [user] - Swarm around player\n" ..
+                         "• bodyguard - Defend against intruders\n" ..
+                         "• stack [user] - Stack on top of each other\n" ..
+                         "• mech [user] - Form a giant mech body\n" ..
+                         "• alt mech - Mech follows behind you\n" ..
+                         "• elevator - Rising platform beneath you\n" ..
+                         "• carpet / aladdin - Fly on a carpet of alts\n" ..
+                         "• stalk - Each alt follows a different player\n" ..
+                         "• allfling - Alts split up and fling everyone\n" ..
+                         "• fling [user] - All alts gang up and fling user\n" ..
+
+                         -- NEW UFO & STRIKE
+                         "• ufo - Fly riding on a spinning disk of alts\n" ..
+                         "• strike [user] - Send an alt from the UFO to homing missile a player\n" ..
+
+                         "• orbit - Alts orbit around you in a 3D sphere\n" ..
+                         "• tornado [user] - Alts sprint-jump vortex around a player\n" ..
+                         "• haunted [user] - Alts creepily stalk and stare at a player\n" ..
+
+                         "• chat [message] - Make alts say something\n" ..
+                         "• panic / scatter - Random scattering\n" ..
+                         "• cmds - Toggle this menu"
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -40, 1, -80)
+    label.Position = UDim2.new(0, 20, 0, 60)
+    label.BackgroundTransparency = 1
+    label.Text = commandsText
+    label.TextColor3 = Color3.fromRGB(220, 220, 220)
+    label.Font = Enum.Font.GothamMedium
+    label.TextSize = 20
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Top
+    label.Parent = frame
+
+    task.delay(15, function()
+        if part.Parent then part:Destroy() end
+    end)
+end
+
+local function ProcessCommand(cmd)
+    cmd = string.match(cmd, "^%s*(.-)%s*$") -- trim
+    local cmdLower = string.lower(cmd)
+
+    if cmdLower == "cmds" then
+        ShowCommandsGUI()
+        return
+    end
+
+    -- JUMP
+    if cmdLower == "jump" then
+        local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+        print("[Alt Controller] Jumped!")
+        return
+    end
+    
+    -- STOP
+    if cmdLower == "stop" then
+        StopAllActions()
+        print("[Alt Controller] Stopped all actions.")
+        return
+    end
+
+    -- RESET (respawns the character)
+    if cmdLower == "reset" then
+        StopAllActions()
+        if LocalPlayer.Character then
+            local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                humanoid.Health = 0
+            end
+        end
+        print("[Alt Controller] Resetting character...")
+        return
+    end
+
+    -- CHAT
+    if string.sub(cmdLower, 1, 4) == "chat" then
+        local chatMsg = string.match(string.sub(cmd, 5), "^%s*(.-)%s*$")
+        if chatMsg and chatMsg ~= "" then
+            local TextChatService = game:GetService("TextChatService")
+            local ReplicatedStorage = game:GetService("ReplicatedStorage")
+            if TextChatService and TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+                pcall(function() TextChatService.TextChannels.RBXGeneral:SendAsync(chatMsg) end)
+            elseif ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents") then
+                pcall(function() ReplicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(chatMsg, "All") end)
+            end
+            print("[Alt Controller] Said: " .. chatMsg)
+        end
+        return
+    end
+
+    -- BRING
+    if string.sub(cmdLower, 1, 5) == "bring" then
+        StopAllActions()
+        print("[Alt Controller] Bringing alt to Main Account...")
+        
+        local leaderPlayer = FindPlayer(Config.MainAccount)
+        if leaderPlayer and leaderPlayer.Character and leaderPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local leaderRoot = leaderPlayer.Character.HumanoidRootPart
+            if LocalPlayer.Character then
+                -- Add a small random offset so they don't all teleport into the exact same point and fling
+                local offset = Vector3.new(math.random(-3, 3), 0, math.random(-3, 3))
+                LocalPlayer.Character:PivotTo(leaderRoot.CFrame * CFrame.new(offset))
+            end
+        else
+            print("[Alt Controller] Main Account not found or missing character.")
+        end
+        return
+    end
+
+    local function ParseArg(idx)
+        return string.match(string.sub(cmd, idx), "^%s*(.-)%s*$")
+    end
+
+    local function ApplyModeSetup(modeName)
+        CurrentMode = modeName
+        local char = LocalPlayer.Character
+        if char then
+            for _, child in ipairs(char:GetChildren()) do
+                if child:IsA("BasePart") then
+                    child.CanCollide = false
+                elseif child:IsA("Accessory") then
+                    local handle = child:FindFirstChild("Handle")
+                    if handle and handle:IsA("BasePart") then
+                        handle.CanCollide = false
+                    end
+                end
+            end
+        end
+    end
+
+    -- WORM
+    if string.sub(cmdLower, 1, 4) == "worm" then
+        StopAllActions()
+        ApplyModeSetup("worm")
+        local argStr = ParseArg(5)
+
+        if argStr == "" then
+            CommandLeader = Config.MainAccount
+            print("[Alt Controller] Worm ON (tracking Main Account).")
+        else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then
+                CommandLeader = targetPlayer.Name
+                print("[Alt Controller] Worm target -> " .. targetPlayer.Name)
+            end
+        end
+        UpdateFollowTarget()
+        return
+    end
+
+    -- VFORM
+    if string.sub(cmdLower, 1, 5) == "vform" then
+        StopAllActions()
+        ApplyModeSetup("vform")
+        local argStr = ParseArg(6)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        print("[Alt Controller] V-Formation ON.")
+        return
+    elseif string.sub(cmdLower, 1, 6) == "vshape" then
+        StopAllActions()
+        ApplyModeSetup("vform")
+        local argStr = ParseArg(7)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        print("[Alt Controller] V-Formation ON.")
+        return
+    end
+
+    -- ARMY
+    if string.sub(cmdLower, 1, 4) == "army" then
+        StopAllActions()
+        ApplyModeSetup("army")
+        local argStr = ParseArg(5)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        print("[Alt Controller] Army March ON.")
+        return
+    end
+
+    -- FLANK
+    if string.sub(cmdLower, 1, 5) == "flank" then
+        StopAllActions()
+        ApplyModeSetup("flank")
+        local argStr = ParseArg(6)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        print("[Alt Controller] Flank Formation ON.")
+        return
+    end
+    
+    -- CIRCLE IN
+    if string.sub(cmdLower, 1, 8) == "circlein" or string.sub(cmdLower, 1, 9) == "circle in" then
+        StopAllActions()
+        ApplyModeSetup("circlein")
+        local argStr = cmdLower:find("^circlein") and ParseArg(9) or ParseArg(10)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        print("[Alt Controller] Circle In ON.")
+        return
+    end
+
+    -- CIRCLE OUT
+    if string.sub(cmdLower, 1, 9) == "circleout" or string.sub(cmdLower, 1, 10) == "circle out" then
+        StopAllActions()
+        ApplyModeSetup("circleout")
+        local argStr = cmdLower:find("^circleout") and ParseArg(10) or ParseArg(11)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        print("[Alt Controller] Circle Out ON.")
+        return
+    end
+
+    -- SPIN
+    if string.sub(cmdLower, 1, 4) == "spin" then
+        StopAllActions()
+        ApplyModeSetup("spin")
+        local argStr = ParseArg(5)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        print("[Alt Controller] Spinning around -> " .. tostring(CommandLeader))
+        return
+    end
+
+    -- SWARM
+    if string.sub(cmdLower, 1, 5) == "swarm" then
+        StopAllActions()
+        ApplyModeSetup("swarm")
+        local argStr = ParseArg(6)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        print("[Alt Controller] Swarming -> " .. tostring(CommandLeader))
+        return
+    end
+
+    -- BODYGUARD
+    if string.sub(cmdLower, 1, 9) == "bodyguard" then
+        StopAllActions()
+        ApplyModeSetup("bodyguard")
+        local argStr = ParseArg(10)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        print("[Alt Controller] Bodyguard mode ON for -> " .. tostring(CommandLeader))
+        return
+    end
+
+    -- STACK
+    if string.sub(cmdLower, 1, 5) == "stack" then
+        StopAllActions()
+        ApplyModeSetup("stack")
+        local argStr = ParseArg(6)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        
+        -- Set up PlatformStand + BodyPosition immediately
+        local myCharacter = LocalPlayer.Character
+        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+        if myRoot and myHumanoid then
+            myHumanoid.PlatformStand = true
+            
+            -- Create BodyPosition if it doesn't exist
+            if not myRoot:FindFirstChildOfClass("BodyPosition") then
+                local bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+                bp.D = 500
+                bp.P = 5000
+                bp.Position = myRoot.Position
+                bp.Parent = myRoot
+            end
+            
+            -- Create BodyGyro to keep them upright
+            if not myRoot:FindFirstChildOfClass("BodyGyro") then
+                local bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                bg.CFrame = myRoot.CFrame
+                bg.Parent = myRoot
+            end
+        end
+        
+        print("[Alt Controller] Stack ON -> " .. tostring(CommandLeader))
+        return
+    end
+
+    -- MECH
+    if string.sub(cmdLower, 1, 8) == "alt mech" or string.sub(cmdLower, 1, 7) == "altmech" then
+        StopAllActions()
+        ApplyModeSetup("altmech")
+        local argStr = cmdLower:find("^alt mech") and ParseArg(9) or ParseArg(8)
+        if argStr == "" then
+            CommandLeader = Config.MainAccount
+        else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        
+        -- Set up PlatformStand + BodyPosition for the first 7 alts (mech body slots)
+        local myCharacter = LocalPlayer.Character
+        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+        local myOffset = math.max(1, MyIndex - 1)
+        if myRoot and myHumanoid and myOffset <= 7 then
+            myHumanoid.PlatformStand = true
+            
+            if not myRoot:FindFirstChildOfClass("BodyPosition") then
+                local bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bp.D = 2000
+                bp.P = 50000
+                bp.Position = myRoot.Position
+                bp.Parent = myRoot
+            end
+            
+            if not myRoot:FindFirstChildOfClass("BodyGyro") then
+                local bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                bg.CFrame = myRoot.CFrame
+                bg.Parent = myRoot
+            end
+        end
+        
+        print("[Alt Controller] Alt Mech ON -> " .. tostring(CommandLeader))
+        return
+    end
+
+    if string.sub(cmdLower, 1, 4) == "mech" then
+        StopAllActions()
+        ApplyModeSetup("mech")
+        local argStr = ParseArg(5)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        
+        -- Only set up PlatformStand + BodyPosition for the first 7 alts (mech body slots)
+        local myCharacter = LocalPlayer.Character
+        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+        local myOffset = math.max(1, MyIndex - 1)
+        if myRoot and myHumanoid and myOffset <= 7 then
+            myHumanoid.PlatformStand = true
+            
+            if not myRoot:FindFirstChildOfClass("BodyPosition") then
+                local bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bp.D = 2000
+                bp.P = 50000
+                bp.Position = myRoot.Position
+                bp.Parent = myRoot
+            end
+            
+            if not myRoot:FindFirstChildOfClass("BodyGyro") then
+                local bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                bg.CFrame = myRoot.CFrame
+                bg.Parent = myRoot
+            end
+        end
+        
+        print("[Alt Controller] Mech ON -> " .. tostring(CommandLeader))
+        return
+    end
+
+    -- STALK
+    if string.sub(cmdLower, 1, 5) == "stalk" then
+        StopAllActions()
+        ApplyModeSetup("stalk")
+        CommandLeader = Config.MainAccount
+        UpdateFollowTarget()
+        print("[Alt Controller] Stalk ON — each alt tailing a different player.")
+        return
+    end
+
+    -- ALL FLING
+    if string.sub(cmdLower, 1, 8) == "allfling" or string.sub(cmdLower, 1, 9) == "all fling" then
+        StopAllActions()
+        ApplyModeSetup("allfling")
+        CommandLeader = Config.MainAccount
+        UpdateFollowTarget()
+        print("[Alt Controller] All Fling ON — targeting everyone.")
+        return
+    end
+
+    -- FLING [USER] (Assassin Override - Does not break formations)
+    if string.sub(cmdLower, 1, 5) == "fling" and cmdLower ~= "allfling" and cmdLower ~= "all fling" then
+        local argStr = ParseArg(6)
+        if argStr ~= "" then
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then
+                SingleFlingTarget = targetPlayer.Name
+                print("[Alt Controller] Assassin Fling sent against: " .. targetPlayer.Name)
+            end
+        else
+            SingleFlingTarget = nil
+            print("[Alt Controller] Assassin Fling cancelled.")
+        end
+        return
+    end
+
+    -- SCATTER
+    if string.sub(cmdLower, 1, 7) == "scatter" then
+        StopAllActions()
+        ApplyModeSetup("scatter")
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local pos = LocalPlayer.Character.HumanoidRootPart.Position
+            ScatterTarget = pos + Vector3.new(math.random(-500, 500), 0, math.random(-500, 500))
+        end
+        print("[Alt Controller] Scattering!")
+        return
+    elseif string.sub(cmdLower, 1, 5) == "panic" then
+        StopAllActions()
+        ApplyModeSetup("scatter")
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local pos = LocalPlayer.Character.HumanoidRootPart.Position
+            ScatterTarget = pos + Vector3.new(math.random(-500, 500), 0, math.random(-500, 500))
+        end
+        print("[Alt Controller] Scattering!")
+        return
+    end
+    
+    -- ELEVATOR
+    if cmdLower == "elevator" then
+        StopAllActions()
+        ApplyModeSetup("elevator")
+        CommandLeader = Config.MainAccount
+        UpdateFollowTarget()
+        
+        -- Set up PlatformStand + BodyPosition (like stack)
+        local myCharacter = LocalPlayer.Character
+        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+        if myRoot and myHumanoid then
+            myHumanoid.PlatformStand = true
+            
+            if not myRoot:FindFirstChildOfClass("BodyPosition") then
+                local bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bp.D = 2000
+                bp.P = 50000
+                bp.Position = myRoot.Position
+                bp.Parent = myRoot
+            end
+            
+            if not myRoot:FindFirstChildOfClass("BodyGyro") then
+                local bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                bg.CFrame = myRoot.CFrame
+                bg.Parent = myRoot
+            end
+        end
+        
+        print("[Alt Controller] Elevator ON.")
+        return
+    end
+    
+    -- CARPET
+    if cmdLower == "carpet" or cmdLower == "aladdin" then
+        StopAllActions()
+        ApplyModeSetup("carpet")
+        CommandLeader = Config.MainAccount
+        UpdateFollowTarget()
+        
+        -- Set up PlatformStand + BodyPosition (exactly like elevator)
+        local myCharacter = LocalPlayer.Character
+        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+        if myRoot and myHumanoid then
+            myHumanoid.PlatformStand = true
+            
+            if not myRoot:FindFirstChildOfClass("BodyPosition") then
+                local bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bp.D = 2000
+                bp.P = 50000
+                bp.Position = myRoot.Position
+                bp.Parent = myRoot
+            end
+            
+            if not myRoot:FindFirstChildOfClass("BodyGyro") then
+                local bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                bg.CFrame = myRoot.CFrame
+                bg.Parent = myRoot
+            end
+        end
+        
+        print("[Alt Controller] Carpet ON.")
+        return
+    end
+    
+
+    -- UFO
+    if cmdLower == "ufo" then
+        StopAllActions()
+        ApplyModeSetup("ufo")
+        CommandLeader = Config.MainAccount
+        UpdateFollowTarget()
+        
+        -- Set up PlatformStand + BodyPosition (exactly like carpet)
+        local myCharacter = LocalPlayer.Character
+        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+        if myRoot and myHumanoid then
+            myHumanoid.PlatformStand = true
+            
+            if not myRoot:FindFirstChildOfClass("BodyPosition") then
+                local bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bp.D = 2000
+                bp.P = 50000
+                bp.Position = myRoot.Position
+                bp.Parent = myRoot
+            end
+            
+            if not myRoot:FindFirstChildOfClass("BodyGyro") then
+                local bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                bg.CFrame = myRoot.CFrame
+                bg.Parent = myRoot
+            end
+        end
+        
+        print("[Alt Controller] UFO ON.")
+        return
+    end
+
+    -- ORBIT
+    if string.sub(cmdLower, 1, 5) == "orbit" then
+        StopAllActions()
+        ApplyModeSetup("orbit")
+        local argStr = ParseArg(6)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        
+        local myCharacter = LocalPlayer.Character
+        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+        if myRoot and myHumanoid then
+            myHumanoid.PlatformStand = true
+            
+            if not myRoot:FindFirstChildOfClass("BodyPosition") then
+                local bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bp.D = 2000
+                bp.P = 50000
+                bp.Position = myRoot.Position
+                bp.Parent = myRoot
+            end
+            
+            if not myRoot:FindFirstChildOfClass("BodyGyro") then
+                local bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                bg.CFrame = myRoot.CFrame
+                bg.Parent = myRoot
+            end
+        end
+        
+        print("[Alt Controller] Orbit ON -> " .. tostring(CommandLeader))
+        return
+    end
+
+    -- TORNADO
+    if string.sub(cmdLower, 1, 7) == "tornado" then
+        StopAllActions()
+        ApplyModeSetup("tornado")
+        local argStr = ParseArg(8)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        
+        -- Set up tornado physics on the humanoid
+        local myCharacter = LocalPlayer.Character
+        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+        if myHumanoid then
+            myHumanoid.WalkSpeed = 50
+            myHumanoid.HipHeight = 0.5 -- Low enough for quick bounce-back but high enough for Jump to register
+        end
+        
+        print("[Alt Controller] Tornado ON -> " .. tostring(CommandLeader))
+        return
+    end
+
+    -- HAUNTED
+    if string.sub(cmdLower, 1, 7) == "haunted" or string.sub(cmdLower, 1, 6) == "haunt " then
+        StopAllActions()
+        ApplyModeSetup("haunted")
+        local argStr = (cmdLower:find("^haunted")) and ParseArg(8) or ParseArg(7)
+        if argStr == "" then CommandLeader = Config.MainAccount else
+            local targetPlayer = FindPlayer(argStr)
+            if targetPlayer then CommandLeader = targetPlayer.Name end
+        end
+        UpdateFollowTarget()
+        
+        -- Reset haunted state
+        hauntedPhase = "idle"
+        hauntedTimer = math.random() * 5 + 2
+        
+        print("[Alt Controller] Haunted ON -> " .. tostring(CommandLeader))
+        return
+    end
+
+    -- STRIKE (dispatched by main account with __idx suffix)
+    if string.sub(cmdLower, 1, 6) == "strike" then
+        local fullArg = ParseArg(7)
+        if fullArg ~= "" then
+            -- Parse assigned alt index from the command (format: "playername __idx2")
+            local playerName, assignedIdx = string.match(fullArg, "^(.-)%s+__idx(%d+)$")
+            if not playerName or playerName == "" then
+                -- Fallback: old format without index, default to alt 1
+                playerName = string.match(fullArg, "^(.-)%s*$") -- Trim trailing spaces
+                assignedIdx = 1
+            else
+                playerName = string.match(playerName, "^%s*(.-)%s*$") -- Trim whitespace
+                assignedIdx = tonumber(assignedIdx)
+            end
+            
+            local targetPlayer = FindPlayer(playerName)
+            local altIndexOffset = math.max(1, MyIndex - 1)
+            
+            if targetPlayer and altIndexOffset == assignedIdx then
+                ActiveStrikes[altIndexOffset] = {
+                    targetName = targetPlayer.Name,
+                    timer = 0,
+                    phase = "homing"
+                }
+                print("[Alt Controller] I am striking: " .. targetPlayer.Name)
+            end
+        end
+        return
+    end
+
+    print("[Alt Controller] Received command:", cmdLower)
+end
+
+-- ==========================================
+-- EXEC INVISIBLE COMM BRIDGE
+-- ==========================================
+local IPC_FILE = "alt_controller_cmd.txt"
+
+local function BroadcastCmdInvisible(cmd)
+    if writefile then
+        local payload = cmd .. "|" .. tostring(tick())
+        pcall(function() 
+            writefile(IPC_FILE, payload) 
+        end)
+    else
+        warn("[Alt Controller] Executor lacks 'writefile'. Commands will not work.")
+    end
+end
+
+-- ==========================================
+-- COMMAND BAR GUI (Main Account Only)
+-- ==========================================
+
+local function CreateCommandBar()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "AltControllerCommandBar"
+    screenGui.ResetOnSpawn = false
+    pcall(function() screenGui.Parent = CoreGui end)
+    if not screenGui.Parent then
+        screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 400, 0, 50)
+    frame.Position = UDim2.new(0.5, -200, 1, 50)
+    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    frame.BorderSizePixel = 0
+    frame.Parent = screenGui
+
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    local stroke = Instance.new("UIStroke", frame)
+    stroke.Color = Color3.fromRGB(100, 100, 100)
+    stroke.Thickness = 1
+
+    local textBox = Instance.new("TextBox")
+    textBox.Size = UDim2.new(1, -20, 1, 0)
+    textBox.Position = UDim2.new(0, 10, 0, 0)
+    textBox.BackgroundTransparency = 1
+    textBox.Font = Enum.Font.GothamMedium
+    textBox.TextSize = 18
+    textBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    textBox.PlaceholderText = "Enter command (e.g. worm, stack, jump)..."
+    textBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+    textBox.TextXAlignment = Enum.TextXAlignment.Left
+    textBox.ClearTextOnFocus = true
+    textBox.Parent = frame
+
+    local isVisible = false
+
+    local function ToggleCommandBar()
+        isVisible = not isVisible
+        if isVisible then
+            frame:TweenPosition(UDim2.new(0.5, -200, 1, -100), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, 0.3, true, function()
+                textBox:CaptureFocus()
+            end)
+        else
+            textBox:ReleaseFocus()
+            frame:TweenPosition(UDim2.new(0.5, -200, 1, 50), Enum.EasingDirection.In, Enum.EasingStyle.Quart, 0.3, true, function()
+                textBox.Text = ""
+            end)
+        end
+    end
+
+    local isHiding = false
+    local function HideCommandBar()
+        if isHiding then return end
+        isHiding = true
+        isVisible = false
+        textBox:ReleaseFocus()
+        frame:TweenPosition(UDim2.new(0.5, -200, 1, 50), Enum.EasingDirection.In, Enum.EasingStyle.Quart, 0.3, true, function()
+            textBox.Text = ""
+            isHiding = false
+        end)
+    end
+
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed and not textBox:IsFocused() then return end
+        if input.KeyCode == Enum.KeyCode.N and not textBox:IsFocused() then
+            ToggleCommandBar()
+        end
+    end)
+
+    return textBox, ToggleCommandBar, HideCommandBar
+end
+
+-- ==========================================
+-- MAIN LOGIC
+-- ==========================================
+
+local isAlt = false
+for altName, _ in pairs(Config.Alts) do
+    if string.lower(altName) == string.lower(LocalPlayer.Name) then
+        isAlt = true
+        break
+    end
+end
+
+if isAlt then
+    -- === ALT ACCOUNT ===
+    UpdateFollowTarget()
+    print("[Alt Controller] Alt loaded: " .. LocalPlayer.Name)
+
+    -- OPT #1: Cached character references (refreshed on CharacterAdded)
+    local cachedRoot = nil
+    local cachedHumanoid = nil
+    
+    local function RefreshCharacterCache()
+        local char = LocalPlayer.Character
+        if char then
+            cachedRoot = char:FindFirstChild("HumanoidRootPart")
+            cachedHumanoid = char:FindFirstChildOfClass("Humanoid")
+        else
+            cachedRoot = nil
+            cachedHumanoid = nil
+        end
+    end
+    RefreshCharacterCache()
+    
+    -- OPT #2: Cached bodyguard intruder scan results
+    local cachedIntruders = {}
+    local lastIntruderScan = 0
+    
+    local lastPos = Vector3.zero
+    local stuckTimer = 0
+
+    -- Collisions are disabled dynamically inside ProcessCommand when a mode starts
+    LocalPlayer.CharacterAdded:Connect(function(character)
+        task.wait(0.3)
+        RefreshCharacterCache() -- OPT #1: Refresh cache on respawn
+        if CurrentMode ~= "none" then
+            for _, child in ipairs(character:GetChildren()) do
+                if child:IsA("BasePart") then
+                    -- Keep collisions ON for carpet and allfling modes so they hit people/world
+                    if CurrentMode ~= "allfling" and CurrentMode ~= "carpet" then
+                        child.CanCollide = false
+                    end
+                elseif child:IsA("Accessory") then
+                    local handle = child:FindFirstChild("Handle")
+                    if handle and handle:IsA("BasePart") then
+                        if CurrentMode ~= "allfling" and CurrentMode ~= "carpet" then
+                            handle.CanCollide = false
+                        end
+                    end
+                end
+            end
+            
+            -- Re-apply walk velocities if they respawn mid-formation
+            local myHumanoid = character:FindFirstChildOfClass("Humanoid")
+            if myHumanoid then
+                -- Disable sitting
+                myHumanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+                
+                if CurrentMode == "vform" or CurrentMode == "circlein" or CurrentMode == "circleout" or CurrentMode == "spin" or CurrentMode == "army" or CurrentMode == "flank" or CurrentMode == "bodyguard" then
+                    myHumanoid.WalkSpeed = 16
+                end
+            end
+            
+            -- Extra safety: Destroy SeatWelds instantly if they somehow get created
+            character.ChildAdded:Connect(function(child)
+                if child:IsA("Weld") and child.Name == "SeatWeld" then
+                    task.wait()
+                    child:Destroy()
+                end
+            end)
+        end
+    end)
+
+    -- Invisible Executor Polling Listener
+    if readfile and isfile then
+        local lastTick = 0
+        local lastCheck = 0
+        
+        RunService.Heartbeat:Connect(function()
+            -- Reduced delay from 0.05 to 0.02 for ultra-responsive commands
+            if tick() - lastCheck < 0.02 then return end
+            lastCheck = tick()
+            
+            local s, out = pcall(function()
+                if isfile(IPC_FILE) then return readfile(IPC_FILE) end
+                return nil
+            end)
+            if s and out then
+                local delim = string.find(out, "|", 1, true)
+                if delim then
+                    local cmdStr = string.sub(out, 1, delim - 1)
+                    local tickStr = string.sub(out, delim + 1)
+                    local parsedTick = tonumber(tickStr)
+                    
+                    if parsedTick and parsedTick > lastTick then
+                        if lastTick == 0 and math.abs(tick() - parsedTick) > 5 then
+                            lastTick = parsedTick 
+                        else
+                            lastTick = parsedTick
+                            ProcessCommand(cmdStr)
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- Tracking variables for AllFling timeouts
+    local lastModeTracked = "none"
+    local allFlingBlacklist = {}
+    local allFlingTarget = nil
+    local allFlingTimer = 0
+    
+    -- Persistent targets for stalk mode
+    local myPersistentTarget = nil
+    
+    -- Global override for assassin fling (Alt 1 only)
+    -- (Declared at root)
+    
+    -- UFO and Strike Variables
+    local ActiveStrikes = {} -- { [altIndex] = { targetName = string, timer = number, phase = string } }
+    
+    -- Haunted mode state
+    local hauntedPhase = "idle" -- "idle" or "creeping"
+    local hauntedTimer = math.random() * 5 + 2 -- Random initial delay (2-7 seconds)
+    
+    -- MOVEMENT LOGIC
+    RunService.Heartbeat:Connect(function(dt)
+        if CurrentMode ~= lastModeTracked then
+            lastModeTracked = CurrentMode
+            allFlingBlacklist = {}
+            allFlingTarget = nil
+            allFlingTimer = 0
+            myPersistentTarget = nil
+        end
+        
+        -- OPT #1: Use cached refs instead of FindFirstChild every frame
+        local myRoot = cachedRoot
+        local myHumanoid = cachedHumanoid
+        
+        -- Fallback: refresh cache if refs went stale
+        if not myRoot or not myRoot.Parent or not myHumanoid or not myHumanoid.Parent then
+            RefreshCharacterCache()
+            myRoot = cachedRoot
+            myHumanoid = cachedHumanoid
+        end
+        
+        -- PREVENT RESPAWN BUGS: Do nothing if the character is dead or missing
+        if not (myRoot and myHumanoid) or myHumanoid.Health <= 0 then return end
+        
+        local altIndexOffset = math.max(1, MyIndex - 1)
+        
+        -- ASSASSIN FLING OVERRIDE (Only Alt 1)
+        if SingleFlingTarget and altIndexOffset == 1 then
+            local tPlayer = FindPlayer(SingleFlingTarget)
+            if tPlayer and tPlayer.Character and tPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                local tRoot = tPlayer.Character.HumanoidRootPart
+                -- Spin rapidly
+                local bav = myRoot:FindFirstChild("FlingSpin")
+                if not bav then
+                    bav = Instance.new("BodyAngularVelocity")
+                    bav.Name = "FlingSpin"
+                    bav.AngularVelocity = Vector3.new(99999, 99999, 99999)
+                    bav.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+                    bav.P = math.huge
+                    bav.Parent = myRoot
+                end
+                
+                -- Teleport directly into target
+                myRoot.CFrame = tRoot.CFrame
+                return -- Skip formation logic completely
+            else
+                -- Target is dead or left, disable assassin mode
+                SingleFlingTarget = nil
+                local bav = myRoot:FindFirstChild("FlingSpin")
+                if bav then bav:Destroy() end
+            end
+        elseif altIndexOffset == 1 and not SingleFlingTarget then
+            local bav = myRoot:FindFirstChild("FlingSpin")
+            if bav and CurrentMode ~= "allfling" and CurrentMode ~= "fling" then bav:Destroy() end
+        end
+
+        if CurrentMode == "none" then return end
+
+        if CurrentMode == "scatter" then
+            if ScatterTarget then
+                if (myRoot.Position - ScatterTarget).Magnitude < 4 then
+                    ScatterTarget = myRoot.Position + Vector3.new(math.random(-50, 50), 0, math.random(-50, 50))
+                end
+                myHumanoid:MoveTo(ScatterTarget)
+                if math.random() < 0.02 then
+                    myHumanoid.Jump = true
+                end
+            end
+            return
+        end
+
+        local targetName = (CurrentMode == "worm") and MyFollowTarget or CommandLeader
+        if not targetName then return end
+        
+        -- If this Alt is the designated leader for the formation, they should stand still, not chase themselves!
+        if targetName == LocalPlayer.Name then return end
+
+        local targetPlayer = Players:FindFirstChild(targetName)
+        local targetRoot = targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local targetHumanoid = targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChildOfClass("Humanoid")
+        
+        if not targetRoot then return end
+        
+
+        if CurrentMode == "worm" then
+            local targetPos = targetRoot.Position
+            local isJumping = targetHumanoid.Jump or (targetHumanoid:GetState() == Enum.HumanoidStateType.Jumping) or (targetHumanoid:GetState() == Enum.HumanoidStateType.Freefall)
+            
+            -- Only record crumbs if they moved enough (1.5 studs)
+            if #TargetBreadcrumbs == 0 or (TargetBreadcrumbs[1].pos - targetPos).Magnitude > 1.5 then
+                table.insert(TargetBreadcrumbs, 1, {pos = targetPos, jump = isJumping})
+            else
+                if isJumping and #TargetBreadcrumbs > 0 then
+                    TargetBreadcrumbs[1].jump = true
+                end
+            end
+            
+            -- OPT #5: Tighter breadcrumb pruning — cap based on actual need
+            local MaxCrumbs = math.max(20, TotalAlts * 4)
+            while #TargetBreadcrumbs > MaxCrumbs do
+                table.remove(TargetBreadcrumbs)
+            end
+            
+            -- Find the correct crumb for THIS alt, based on their index
+            -- At 1.5 studs per crumb minimum, spacing them by 1 crumb means ~1.5 to 2.5 studs spacing.
+            local idealCrumbIndex = 2 -- Everyone stays exactly 2 crumbs behind the person directly in front of them
+            idealCrumbIndex = math.clamp(idealCrumbIndex, 1, #TargetBreadcrumbs)
+
+            local myCrumb = TargetBreadcrumbs[idealCrumbIndex]
+
+            -- If there aren't enough crumbs generated yet for this alt to have its spaced out position, just wait.
+            if not myCrumb then 
+                myHumanoid:Move(Vector3.zero, false)
+                return 
+            end
+
+            -- 3. Calculate 2D distance to our specific crumb
+            local dist2DToCrumb = Vector2.new(myRoot.Position.X - myCrumb.pos.X, myRoot.Position.Z - myCrumb.pos.Z).Magnitude
+            
+            -- 4. Move to our designated crumb
+            if dist2DToCrumb > 0.8 then
+                myHumanoid.AutoRotate = true
+                myHumanoid:MoveTo(myCrumb.pos)
+                
+                -- Check for jumps closer ahead of us (scan up to 4 crumbs back)
+                local checkJumpIndex = math.max(1, idealCrumbIndex - 3)
+                for i = idealCrumbIndex, checkJumpIndex, -1 do
+                    if TargetBreadcrumbs[i] and TargetBreadcrumbs[i].jump then
+                        local crumbDist = Vector2.new(myRoot.Position.X - TargetBreadcrumbs[i].pos.X, myRoot.Position.Z - TargetBreadcrumbs[i].pos.Z).Magnitude
+                        if crumbDist < 3.0 then
+                            myHumanoid.Jump = true
+                            break
+                        end
+                    end
+                end
+            else
+                -- We reached our exact spot in the chain. Wait for leader to keep walking.
+                myHumanoid.AutoRotate = false
+                myHumanoid:MoveTo(myRoot.Position)
+                
+                -- Look slightly ahead towards where they need to go next
+                local lookPos
+                if idealCrumbIndex > 1 then
+                    lookPos = TargetBreadcrumbs[idealCrumbIndex - 1].pos
+                else
+                    lookPos = targetPos
+                end
+                
+                local lookTarget = Vector3.new(lookPos.X, myRoot.Position.Y, lookPos.Z)
+                if (lookTarget - myRoot.Position).Magnitude > 0.01 then
+                    myRoot.CFrame = CFrame.lookAt(myRoot.Position, lookTarget)
+                end
+            end
+
+        elseif CurrentMode == "vform" then
+            local row = math.ceil(altIndexOffset / 2)
+            local isLeft = (altIndexOffset % 2 == 1)
+            
+            -- If we have an odd number of total alts (like 5 or 7), the very last alt in the V
+            -- will be alone on their row. We want them in the direct center.
+            local isLastRow = (row == math.ceil(TotalAlts / 2))
+            local altsInLastRow = (TotalAlts % 2 == 1) and 1 or 2
+            
+            local xOffset = 0
+            if isLastRow and altsInLastRow == 1 then
+                -- This alt is completely alone in the final row, put them in the middle
+                xOffset = 0
+            else
+                xOffset = (isLeft and -1 or 1) * (row * 4)
+            end
+            
+            local zOffset = row * 4
+            
+            local targetPos = (targetRoot.CFrame * CFrame.new(xOffset, 0, zOffset)).Position
+            myHumanoid.WalkSpeed = 16 -- Enforce walk speed
+            myHumanoid:MoveTo(targetPos)
+
+        elseif CurrentMode == "army" then
+            -- Army march: 3 columns, fills row by row behind the leader
+            local row = math.floor((altIndexOffset - 1) / 3) + 1
+            local colIndex = ((altIndexOffset - 1) % 3) -- 0, 1, or 2
+            
+            -- Check if this alt is in the final row
+            local totalRows = math.ceil(TotalAlts / 3)
+            local isLastRow = (row == totalRows)
+            local altsInLastRow = (TotalAlts % 3 == 0) and 3 or (TotalAlts % 3)
+            
+            local col = 0
+            if isLastRow and altsInLastRow == 1 then
+                -- 1 person alone in the back -> keep them perfectly centered
+                col = 0
+            elseif isLastRow and altsInLastRow == 2 then
+                -- 2 people alone in the back -> center them like a mini row of 2
+                col = (colIndex == 0) and -0.5 or 0.5
+            else
+                -- Normal 3-wide row: Left (-1), Middle (0), Right (1)
+                col = colIndex - 1
+            end
+            
+            local xOffset = col * 4
+            local zOffset = row * 4
+            
+            local targetPos = (targetRoot.CFrame * CFrame.new(xOffset, 0, zOffset)).Position
+            myHumanoid.WalkSpeed = 16
+            myHumanoid:MoveTo(targetPos)
+
+        elseif CurrentMode == "flank" then
+            -- Flank: half left, half right. Very wide spread.
+            local row = math.ceil(altIndexOffset / 2)
+            local isLeft = (altIndexOffset % 2 == 1)
+            
+            -- If uneven number of alts (e.g. 5, 7), the last person goes direct center in the back
+            local isLastRow = (row == math.ceil(TotalAlts / 2))
+            local altsInLastRow = (TotalAlts % 2 == 1) and 1 or 2
+            
+            local xOffset = 0
+            if isLastRow and altsInLastRow == 1 then
+                xOffset = 0 -- Center
+            else
+                xOffset = (isLeft and -12 or 12) -- 12 studs out on each side
+            end
+            
+            local zOffset = (row - 1) * 4 -- Start lined up alongside leader, then filter back
+            
+            local targetPos = (targetRoot.CFrame * CFrame.new(xOffset, 0, zOffset)).Position
+            myHumanoid.WalkSpeed = 16
+            myHumanoid:MoveTo(targetPos)
+
+        elseif CurrentMode == "swarm" then
+            local timeSec = tick()
+            local divisor = math.max(1, TotalAlts)
+            local angle = (altIndexOffset * (math.pi * 2 / divisor)) + (timeSec * 4)
+            local radius = 3 + (altIndexOffset % 2) * 1.5
+            local xOffset = math.cos(angle) * radius
+            local zOffset = math.sin(angle) * radius
+            
+            local targetPos = targetRoot.Position + Vector3.new(xOffset, 0, zOffset)
+            
+            -- Keep AutoRotate ON instead of overriding CFrame so they naturally run along the circle trajectory
+            myHumanoid.AutoRotate = true
+            
+            myHumanoid:MoveTo(targetPos)
+            
+            -- Alts jump randomly
+            if math.random() < 0.05 then
+                myHumanoid.Jump = true
+            end
+            
+        elseif CurrentMode == "circlein" or CurrentMode == "circleout" then
+            local divisor = math.max(1, TotalAlts)
+            -- Give them a fixed spot on the circle based on their index
+            local angle = ((altIndexOffset - 1) * (math.pi * 2 / divisor))
+            local radius = 8 -- Fixed radius for the circle
+            local xOffset = math.cos(angle) * radius
+            local zOffset = math.sin(angle) * radius
+            
+            local targetPos = targetRoot.Position + Vector3.new(xOffset, 0, zOffset)
+            
+            -- Check if they are already in position
+            local distFromTarget = (Vector3.new(targetPos.X, myRoot.Position.Y, targetPos.Z) - myRoot.Position).Magnitude
+            
+            if distFromTarget > 1 then
+                -- Still walking to the spot, let AutoRotate naturally turn them
+                myHumanoid.WalkSpeed = 16 -- Enforce walk speed
+                myHumanoid.AutoRotate = true
+                myHumanoid:MoveTo(targetPos)
+            else
+                -- Once they reach the spot, lock their rotation inward/outward
+                myHumanoid.AutoRotate = false
+                myHumanoid:MoveTo(myRoot.Position) -- Stop excessive moving
+                
+                local lookTarget
+                if CurrentMode == "circlein" then
+                    -- Face towards the leader
+                    lookTarget = Vector3.new(targetRoot.Position.X, myRoot.Position.Y, targetRoot.Position.Z)
+                else
+                    -- Face away from the leader
+                    local awayDir = (myRoot.Position - targetRoot.Position).Unit
+                    lookTarget = myRoot.Position + (awayDir * 5)
+                    lookTarget = Vector3.new(lookTarget.X, myRoot.Position.Y, lookTarget.Z)
+                end
+                
+                if (lookTarget - myRoot.Position).Magnitude > 0.01 then
+                    myRoot.CFrame = CFrame.lookAt(myRoot.Position, lookTarget)
+                end
+            end
+
+        elseif CurrentMode == "spin" then
+            local divisor = math.max(1, TotalAlts)
+            -- Give them a fixed spot on the circle based on their index
+            local angle = ((altIndexOffset - 1) * (math.pi * 2 / divisor))
+            
+            -- Calculate radius so they are roughly 3 studs apart on the circumference
+            -- Calculate radius so they are separated by 3 studs, but pad the spin radius to be larger.
+            local radius = math.max(6, (TotalAlts * 3) / (math.pi * 2))
+            
+            -- Time-based rotation modifier
+            -- 16 studs/sec is normal walk speed. 
+            local timeSec = tick()
+            local spinSpeed = 16 / radius -- Rads per second to match walk speed
+            local currentAngle = angle + (timeSec * spinSpeed)
+
+            local xOffset = math.cos(currentAngle) * radius
+            local zOffset = math.sin(currentAngle) * radius
+            
+            local targetPos = targetRoot.Position + Vector3.new(xOffset, 0, zOffset)
+            
+            -- Walk along the calculated circle
+            myHumanoid.AutoRotate = true
+            myHumanoid:MoveTo(targetPos)
+
+        elseif CurrentMode == "tornado" then
+            -- TORNADO: Tight fast circle using walk, rapid jump spam, low HipHeight
+            local radius = 4 -- Tight vortex
+            local divisor = math.max(1, TotalAlts)
+            local angle = ((altIndexOffset - 1) * (math.pi * 2 / divisor))
+            
+            local timeSec = tick()
+            local spinSpeed = 50 / radius -- Match WalkSpeed to radius for tight circling
+            local currentAngle = angle + (timeSec * spinSpeed)
+            
+            local xOffset = math.cos(currentAngle) * radius
+            local zOffset = math.sin(currentAngle) * radius
+            
+            local targetPos = targetRoot.Position + Vector3.new(xOffset, 0, zOffset)
+            
+            myHumanoid.AutoRotate = true
+            myHumanoid.WalkSpeed = 50
+            myHumanoid.HipHeight = 0.5
+            myHumanoid:MoveTo(targetPos)
+            
+            -- Spam jump every frame — low HipHeight makes them slam back quickly
+            if myHumanoid.FloorMaterial ~= Enum.Material.Air then
+                myHumanoid.Jump = true
+            end
+
+        elseif CurrentMode == "haunted" then
+            -- HAUNTED: Alts idle nearby, then randomly creep toward the target one at a time
+            local distToTarget = (myRoot.Position - targetRoot.Position).Magnitude
+            
+            -- Count down the phase timer
+            hauntedTimer = hauntedTimer - dt
+            
+            if hauntedTimer <= 0 then
+                -- Switch phase
+                if hauntedPhase == "idle" then
+                    hauntedPhase = "creeping"
+                    hauntedTimer = math.random() * 4 + 2 -- Creep for 2-6 seconds
+                else
+                    hauntedPhase = "idle"
+                    hauntedTimer = math.random() * 8 + 3 -- Idle for 3-11 seconds
+                end
+            end
+            
+            -- Calculate idle position using evenly distributed angles per alt
+            local idleRadius = 10
+            local idleAngle = ((altIndexOffset - 1) / math.max(TotalAlts, 1)) * math.pi * 2
+            -- Add a slow drift so they don't look perfectly static
+            idleAngle = idleAngle + math.sin(tick() * 0.15 + altIndexOffset) * 0.3
+            local idlePos = targetRoot.Position + Vector3.new(math.cos(idleAngle) * idleRadius, 0, math.sin(idleAngle) * idleRadius)
+            
+            if distToTarget < 5 then
+                -- Close enough: FREEZE and STARE
+                myHumanoid.WalkSpeed = 16
+                myHumanoid.AutoRotate = false
+                myHumanoid:MoveTo(myRoot.Position) -- Stand still
+                
+                -- Stare directly at them
+                local lookTarget = Vector3.new(targetRoot.Position.X, myRoot.Position.Y, targetRoot.Position.Z)
+                if (lookTarget - myRoot.Position).Magnitude > 0.01 then
+                    myRoot.CFrame = CFrame.lookAt(myRoot.Position, lookTarget)
+                end
+                
+            elseif hauntedPhase == "creeping" then
+                -- Slowly walk toward the target
+                myHumanoid.WalkSpeed = 4
+                myHumanoid.AutoRotate = false
+                myHumanoid:MoveTo(targetRoot.Position)
+                
+                -- Face them while creeping
+                local lookTarget = Vector3.new(targetRoot.Position.X, myRoot.Position.Y, targetRoot.Position.Z)
+                if (lookTarget - myRoot.Position).Magnitude > 0.01 then
+                    myRoot.CFrame = CFrame.lookAt(myRoot.Position, lookTarget)
+                end
+                
+            else
+                -- IDLE: Stand at an evenly distributed position around the target, staring
+                
+                -- Only walk to idle position if we're far from it
+                if (myRoot.Position - idlePos).Magnitude > 2 then
+                    myHumanoid.WalkSpeed = 8
+                    myHumanoid.AutoRotate = false
+                    myHumanoid:MoveTo(idlePos)
+                else
+                    myHumanoid.WalkSpeed = 16
+                    myHumanoid:MoveTo(myRoot.Position) -- Stand still
+                end
+                
+                -- Always face the target
+                local lookTarget = Vector3.new(targetRoot.Position.X, myRoot.Position.Y, targetRoot.Position.Z)
+                if (lookTarget - myRoot.Position).Magnitude > 0.01 then
+                    myRoot.CFrame = CFrame.lookAt(myRoot.Position, lookTarget)
+                end
+            end
+            
+        elseif CurrentMode == "bodyguard" then
+            -- Bodyguard: follow main player, attack intruders if within 15 studs
+            -- Only the first numAttackers alts engage, rest hold guard formation
+            local numAttackers = math.clamp(math.ceil(TotalAlts / 2), 2, 6)
+            local isAttacker = (altIndexOffset <= numAttackers)
+            
+            -- OPT #2: Only scan for intruders every 0.25 seconds, cache results
+            if tick() - lastIntruderScan > 0.25 then
+                lastIntruderScan = tick()
+                cachedIntruders = {}
+                
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChildOfClass("Humanoid") and p.Character:FindFirstChildOfClass("Humanoid").Health > 0 then
+                        local pNameLower = string.lower(p.Name)
+                        local isPAlt = false
+                        for aName, _ in pairs(Config.Alts) do
+                            if string.lower(aName) == pNameLower then isPAlt = true break end
+                        end
+                        
+                        if not isPAlt and pNameLower ~= string.lower(CommandLeader) then
+                            local distToLeader = (p.Character.HumanoidRootPart.Position - targetRoot.Position).Magnitude
+                            if distToLeader <= 15 then
+                                table.insert(cachedIntruders, {part = p.Character.HumanoidRootPart, dist = distToLeader})
+                            end
+                        end
+                    end
+                end
+                
+                table.sort(cachedIntruders, function(a, b) return a.dist < b.dist end)
+            end
+            
+            myHumanoid.WalkSpeed = 16
+            myHumanoid.AutoRotate = true
+            
+            if #cachedIntruders > 0 and isAttacker then
+                -- ATTACK: Distribute all alts across intruders evenly using modulo
+                local targetIndex = ((altIndexOffset - 1) % #cachedIntruders) + 1
+                local intruder = cachedIntruders[targetIndex].part
+                
+                -- Figure out which attacker number we are on THIS specific intruder
+                -- Count how many alts with a lower altIndexOffset share the same target
+                local pairIndex = 0
+                for i = 1, altIndexOffset do
+                    if ((i - 1) % #cachedIntruders) + 1 == targetIndex then
+                        pairIndex = pairIndex + 1
+                    end
+                end
+                
+                -- Odd pairIndex = face front of intruder, even = face back
+                local isFront = (pairIndex % 2 == 1)
+                local intruderLook = intruder.CFrame.LookVector
+                local offsetDir = isFront and intruderLook or -intruderLook
+                
+                -- Stagger slightly sideways so multiple front/back alts don't stack
+                local sideOffset = Vector3.new(0, 0, 0)
+                if pairIndex > 2 then
+                    local sideAngle = ((pairIndex - 2) * 0.5) * (pairIndex % 2 == 1 and 1 or -1)
+                    local rightVec = intruder.CFrame.RightVector
+                    sideOffset = rightVec * sideAngle
+                end
+                
+                local combatDist = 3
+                local combatPos = intruder.Position + (offsetDir * combatDist) + sideOffset
+                combatPos = Vector3.new(combatPos.X, intruder.Position.Y, combatPos.Z)
+                
+                myHumanoid:MoveTo(combatPos)
+                
+                -- Face the intruder when close
+                local distToPos = (myRoot.Position - combatPos).Magnitude
+                if distToPos < 1.5 then
+                    myHumanoid.AutoRotate = false
+                    local facePos = Vector3.new(intruder.Position.X, myRoot.Position.Y, intruder.Position.Z)
+                    if (facePos - myRoot.Position).Magnitude > 0.01 then
+                        myRoot.CFrame = CFrame.lookAt(myRoot.Position, facePos)
+                    end
+                end
+                
+                -- Attack if close enough and have a tool equipped
+                if (myRoot.Position - intruder.Position).Magnitude < 4.5 then
+                    local tool = myRoot.Parent and myRoot.Parent:FindFirstChildOfClass("Tool")
+                    if tool then
+                        tool:Activate()
+                    end
+                end
+            else
+                -- GUARD. Box formation around leader (2 per row, left/right).
+                local row = math.ceil(altIndexOffset / 2)
+                local isRight = (altIndexOffset % 2 == 1)
+                local xOffset = isRight and 4 or -4
+                local zOffset = (row - 1) * 4 - 2
+                
+                local guardPos = (targetRoot.CFrame * CFrame.new(xOffset, 0, zOffset)).Position
+                
+                myHumanoid:MoveTo(guardPos)
+                
+                if (guardPos - myRoot.Position).Magnitude < 1.5 then
+                    local outDir = (myRoot.Position - targetRoot.Position)
+                    if outDir.Magnitude > 0.01 then
+                        local lookTarget = myRoot.Position + outDir.Unit * 5
+                        lookTarget = Vector3.new(lookTarget.X, myRoot.Position.Y, lookTarget.Z)
+                        myHumanoid.AutoRotate = false
+                        myRoot.CFrame = CFrame.lookAt(myRoot.Position, lookTarget)
+                    end
+                end
+            end
+
+        elseif CurrentMode == "stack" then
+            -- Stack: alts float above the leader, stacked vertically
+            -- Each alt goes 6 studs higher than the last (roughly character height + gap)
+            local stackHeight = altIndexOffset * 6
+            local targetPos = targetRoot.Position + Vector3.new(0, stackHeight, 0)
+            
+            -- Update the BodyPosition to follow the leader's X/Z but at stack height
+            local bp = myRoot:FindFirstChildOfClass("BodyPosition")
+            if bp then
+                bp.Position = targetPos
+            else
+                -- Recreate if destroyed
+                bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+                bp.D = 500
+                bp.P = 5000
+                bp.Position = targetPos
+                bp.Parent = myRoot
+            end
+            
+            -- Update BodyGyro to face the same direction as the leader
+            local bg = myRoot:FindFirstChildOfClass("BodyGyro")
+            if bg then
+                bg.CFrame = targetRoot.CFrame
+            else
+                bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                bg.CFrame = targetRoot.CFrame
+                bg.Parent = myRoot
+            end
+            
+            -- Keep PlatformStand active (in case something resets it)
+            myHumanoid.PlatformStand = true
+
+        elseif CurrentMode == "mech" or CurrentMode == "altmech" then
+            -- Mech: alts form a giant humanoid body around the leader
+            -- Regular mech: owner is elevated via BodyPosition
+            -- Alt mech: owner stays on ground, mech follows 4 studs behind
+            --
+            -- Slot layout (viewed from front):
+            --           [5 HEAD]
+            --   [1 ARM] [CENTER] [2 ARM]
+            --           [6 BACK]
+            --   [3 LEG]         [4 LEG]
+            --           [7 EXTRA]
+            
+            -- For altmech, the formation center is 4 studs behind and 5 studs up
+            -- (raised so legs at Y=-5 sit at ground level instead of clipping)
+            local mechCenter = targetRoot.CFrame
+            if CurrentMode == "altmech" then
+                mechCenter = targetRoot.CFrame * CFrame.new(0, 5, 4)
+            end
+            
+            -- Check if leader is moving to animate limbs
+            local velocity = targetRoot.AssemblyLinearVelocity
+            local horizontalVel = Vector3.new(velocity.X, 0, velocity.Z)
+            local isMoving = horizontalVel.Magnitude > 0.5
+            
+            -- Forward prediction: compensate for BodyPosition tracking lag
+            local forwardOffset = Vector3.zero
+            if isMoving then
+                forwardOffset = horizontalVel * 0.5
+            end
+            
+            -- OPT #3: Cache static mech slot base offsets, only compute swing per frame
+            local swingSpeed = 8
+            local swingAmount = 2
+            local t = tick() * swingSpeed
+            local swing = isMoving and math.sin(t) * swingAmount or 0
+            local headBob = isMoving and math.sin(t * 2) * 0.3 or 0
+            
+            -- Dynamic offsets per slot (only swing values change per frame)
+            local slotOffset
+            if altIndexOffset == 1 then
+                slotOffset = Vector3.new(4.5, 0, swing) -- Right Arm
+            elseif altIndexOffset == 2 then
+                slotOffset = Vector3.new(-4.5, 0, -swing) -- Left Arm
+            elseif altIndexOffset == 3 then
+                slotOffset = Vector3.new(1.5, -5, -swing) -- Right Leg
+            elseif altIndexOffset == 4 then
+                slotOffset = Vector3.new(-1.5, -5, swing) -- Left Leg
+            elseif altIndexOffset == 5 then
+                slotOffset = Vector3.new(0, 5 + headBob, 0) -- Head
+            elseif altIndexOffset == 6 then
+                slotOffset = Vector3.new(0, 0, 1.5) -- Back
+            elseif altIndexOffset == 7 then
+                slotOffset = Vector3.new(0, 5 + headBob, 1.5) -- Back Head
+            end
+            
+            if altIndexOffset <= 7 and slotOffset then
+                local targetPos = (mechCenter * CFrame.new(slotOffset)).Position + forwardOffset
+                
+                -- Update BodyPosition
+                local bp = myRoot:FindFirstChildOfClass("BodyPosition")
+                if bp then
+                    bp.Position = targetPos
+                else
+                    bp = Instance.new("BodyPosition")
+                    bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                    bp.D = 2000
+                    bp.P = 50000
+                    bp.Position = targetPos
+                    bp.Parent = myRoot
+                end
+                
+                -- Update BodyGyro to match leader's facing direction
+                local bg = myRoot:FindFirstChildOfClass("BodyGyro")
+                if bg then
+                    bg.CFrame = targetRoot.CFrame
+                else
+                    bg = Instance.new("BodyGyro")
+                    bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                    bg.CFrame = targetRoot.CFrame
+                    bg.Parent = myRoot
+                end
+                
+                myHumanoid.PlatformStand = true
+            else
+                -- Extra alts beyond 7: just follow on the ground normally
+                myHumanoid.PlatformStand = false
+                myHumanoid.AutoRotate = true
+                local followPos = (mechCenter * CFrame.new(0, 0, 4 + ((altIndexOffset - 7) * 3))).Position
+                myHumanoid:MoveTo(followPos)
+            end
+
+        elseif CurrentMode == "elevator" or CurrentMode == "carpet" then
+            -- Carpet and Elevator share the centered grid layout sync
+            local cols = math.ceil(math.sqrt(TotalAlts))
+            if TotalAlts >= 5 and TotalAlts <= 9 then cols = 3 end -- Make nice 3-wide rows for typical alt counts
+            
+            local spacingX = 4.2 -- Shoulder to shoulder width
+            local spacingZ = 5.2 -- Head to toe length
+            
+            local gridIndex = altIndexOffset - 1
+            local row = math.floor(gridIndex / cols)
+            local colInRow = gridIndex % cols
+            
+            local itemsInThisRow = cols
+            local totalFullRows = math.floor(TotalAlts / cols)
+            if row == totalFullRows then
+                itemsInThisRow = TotalAlts % cols
+            end
+            if itemsInThisRow == 0 then itemsInThisRow = cols end
+            
+            local totalRows = math.ceil(TotalAlts / cols)
+            
+            -- Center X for this specific row, Center Z for the whole grid
+            local xOffset = (colInRow - (itemsInThisRow - 1) / 2) * spacingX
+            local zOffset = (row - (totalRows - 1) / 2) * spacingZ
+            
+            local yOffset = (CurrentMode == "carpet") and -4.5 or -3
+            
+            -- Forward prediction: compensate for BodyPosition tracking lag
+            local velocity = targetRoot.AssemblyLinearVelocity
+            local horizontalVel = Vector3.new(velocity.X, 0, velocity.Z)
+            local forwardOffset = Vector3.zero
+            if horizontalVel.Magnitude > 0.5 then
+                forwardOffset = horizontalVel * 0.5
+            end
+            
+            -- Apply offset relative to leader's rotation so the grid spins perfectly with them
+            local targetPos = (targetRoot.CFrame * CFrame.new(xOffset, yOffset, zOffset)).Position + forwardOffset
+            
+            local bp = myRoot:FindFirstChildOfClass("BodyPosition")
+            if bp then
+                bp.Position = targetPos
+            else
+                bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bp.D = 2000
+                bp.P = 50000
+                bp.Position = targetPos
+                bp.Parent = myRoot
+            end
+            
+            local layingCFrame = targetRoot.CFrame * CFrame.Angles(math.rad(90), 0, 0)
+            local bg = myRoot:FindFirstChildOfClass("BodyGyro")
+            if bg then
+                bg.CFrame = layingCFrame
+            else
+                bg = Instance.new("BodyGyro")
+                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                bg.CFrame = layingCFrame
+                bg.Parent = myRoot
+            end
+            
+            -- Keep collisions for the world, but disable collisions with the Leader using Constraints
+            if targetRoot and not myRoot:FindFirstChild("CarpetNoCollide") then
+                local ncc = Instance.new("NoCollisionConstraint")
+                ncc.Name = "CarpetNoCollide"
+                ncc.Part0 = myRoot
+                ncc.Part1 = targetRoot
+                ncc.Parent = myRoot
+            end
+            
+            myHumanoid.PlatformStand = true
+
+        elseif CurrentMode == "stalk" or CurrentMode == "allfling" then
+            -- Stalk & AllFling: distribute alts across different non-alt players
+            
+            if altIndexOffset == 1 and CurrentMode == "stalk" then
+                -- First alt stays with the leader
+                local behindPos = (targetRoot.CFrame * CFrame.new(0, 0, 4)).Position
+                myHumanoid.AutoRotate = true
+                myHumanoid.WalkSpeed = 16
+                myHumanoid:MoveTo(behindPos)
+            else
+                -- Validate current persistent target
+                local function isTargetValid(player)
+                    if not player or not player.Parent then return false end
+                    if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then return false end
+                    local hum = player.Character:FindFirstChildOfClass("Humanoid")
+                    if not hum or hum.Health <= 0 then return false end
+                    local pNameLower = string.lower(player.Name)
+                    local isAltOrLeader = (pNameLower == string.lower(CommandLeader))
+                    if not isAltOrLeader then
+                        for aName, _ in pairs(Config.Alts) do
+                            if string.lower(aName) == pNameLower then
+                                isAltOrLeader = true
+                                break
+                            end
+                        end
+                    end
+                    if isAltOrLeader then return false end
+                    local tRoot = player.Character:FindFirstChild("HumanoidRootPart")
+                    if tRoot then
+                        local isFlung = tRoot.AssemblyLinearVelocity.Magnitude > 150 or tRoot.Position.Y > 500 or tRoot.Position.Y < -500
+                        if isFlung or allFlingBlacklist[player.Name] then return false end
+                    end
+                    return true
+                end
+
+                -- Reselect if needed
+                -- In allfling, we use allFlingTarget to allow timeouts. In stalk, we just use myPersistentTarget.
+                local needsNewTarget = false
+                if CurrentMode == "stalk" then
+                    if not isTargetValid(myPersistentTarget) then needsNewTarget = true end
+                elseif CurrentMode == "allfling" then
+                    if not isTargetValid(allFlingTarget) then needsNewTarget = true end
+                end
+
+                if needsNewTarget then
+                    local targets = {}
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        if isTargetValid(p) then
+                            table.insert(targets, p)
+                        end
+                    end
+                    
+                    table.sort(targets, function(a, b) return a.Name < b.Name end)
+                    
+                    if #targets > 0 then
+                        local indexOffset = (CurrentMode == "stalk") and 2 or 1
+                        local assignedIndex = ((altIndexOffset - indexOffset) % #targets) + 1
+                        
+                        -- Add varying offset to prevent alts from clumping when there are fewer targets than alts
+                        -- If multiple alts need to pick the same index (e.g. fewer targets than alts), we space them out.
+                        if CurrentMode == "stalk" then
+                            myPersistentTarget = targets[assignedIndex]
+                        else
+                            allFlingTarget = targets[assignedIndex]
+                            allFlingTimer = 0 -- Reset timer for new fling target
+                        end
+                    else
+                        if CurrentMode == "stalk" then
+                            myPersistentTarget = nil
+                        else
+                            -- No targets for allfling, clear blacklist and reset
+                            allFlingBlacklist = {}
+                            allFlingTarget = nil
+                            local bav = myRoot:FindFirstChild("FlingSpin")
+                            if bav then bav:Destroy() end
+                        end
+                    end
+                end
+
+                local activeTargetPlayer = (CurrentMode == "stalk") and myPersistentTarget or allFlingTarget
+
+                if activeTargetPlayer and activeTargetPlayer.Character and activeTargetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    local assignedRoot = activeTargetPlayer.Character.HumanoidRootPart
+                    if CurrentMode == "stalk" then
+                        -- For stalk, just follow behind them closely
+                        -- Generate an offset based on altIndexOffset so if multiple alts pick the same player, they spread out
+                        local angle = (altIndexOffset * math.pi * 0.5)
+                        local xOff = math.cos(angle) * 3
+                        local zOff = math.sin(angle) * 3
+
+                        local behindPos = (assignedRoot.CFrame * CFrame.new(xOff, 0, 3 + zOff)).Position
+                        myHumanoid.AutoRotate = true
+                        myHumanoid.WalkSpeed = 16
+                        myHumanoid:MoveTo(behindPos)
+                        
+                        local dist = (myRoot.Position - behindPos).Magnitude
+                        if dist < 2 then
+                            myHumanoid.AutoRotate = false
+                            local lookTarget = assignedRoot.Position + assignedRoot.CFrame.LookVector * 10
+                            lookTarget = Vector3.new(lookTarget.X, myRoot.Position.Y, lookTarget.Z)
+                            if (lookTarget - myRoot.Position).Magnitude > 0.01 then
+                                myRoot.CFrame = CFrame.lookAt(myRoot.Position, lookTarget)
+                            end
+                        end
+                    elseif CurrentMode == "allfling" then
+                        -- Fling timeout logic
+                        allFlingTimer = allFlingTimer + dt
+                        if allFlingTimer >= 3 then
+                            allFlingBlacklist[activeTargetPlayer.Name] = true
+                            allFlingTarget = nil
+                            allFlingTimer = 0
+                        else
+                            -- Fling logic
+                            -- Spin rapidly
+                            local bav = myRoot:FindFirstChild("FlingSpin")
+                            if not bav then
+                                bav = Instance.new("BodyAngularVelocity")
+                                bav.Name = "FlingSpin"
+                                bav.AngularVelocity = Vector3.new(99999, 99999, 99999)
+                                bav.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+                                bav.P = math.huge
+                                bav.Parent = myRoot
+                            end
+                            
+                            -- Teleport directly into them to trigger physics fling instantly
+                            myRoot.CFrame = assignedRoot.CFrame
+                        end
+                    end
+                else
+                    -- No valid active target found, just hover around the leader
+                    local behindPos = (targetRoot.CFrame * CFrame.new(0, 0, 4 + altIndexOffset)).Position
+                    myHumanoid.AutoRotate = true
+                    myHumanoid.WalkSpeed = 16
+                    myHumanoid:MoveTo(behindPos)
+                end
+            end
+
+        elseif CurrentMode == "orbit" then
+            -- ORBIT: Each alt orbits on a unique tilted plane, creating a 3D sphere shell
+            local radius = 8
+            local orbitSpeed = 4 -- radians per second (fast!)
+            local timeSec = tick()
+            
+            -- Give each alt a unique orbital plane by tilting at different inclinations
+            -- Spread inclinations evenly from 0 to pi so orbits cover the full sphere
+            local inclination = (altIndexOffset - 1) * math.pi / math.max(TotalAlts, 1)
+            
+            -- Phase offset so alts don't bunch up at the same point
+            local phaseOffset = (altIndexOffset - 1) * (2 * math.pi / math.max(TotalAlts, 1))
+            
+            -- Add a slow secondary wobble so orbits drift and weave
+            local wobble = math.sin(timeSec * 0.3 + altIndexOffset) * 0.4
+            local currentInclination = inclination + wobble
+            
+            -- Calculate position on the tilted great circle
+            local theta = timeSec * orbitSpeed + phaseOffset
+            local xOffset = radius * math.cos(theta)
+            local yOffset = radius * math.sin(theta) * math.sin(currentInclination)
+            local zOffset = radius * math.sin(theta) * math.cos(currentInclination)
+            
+            local targetPos = targetRoot.Position + Vector3.new(xOffset, yOffset, zOffset)
+            
+            local bp = myRoot:FindFirstChildOfClass("BodyPosition")
+            if bp then
+                bp.Position = targetPos
+            else
+                bp = Instance.new("BodyPosition")
+                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bp.D = 2000
+                bp.P = 50000
+                bp.Position = targetPos
+                bp.Parent = myRoot
+            end
+            
+            -- Face the direction of travel (tangent to orbit)
+            local nextTheta = theta + 0.05
+            local nextPos = targetRoot.Position + Vector3.new(
+                radius * math.cos(nextTheta),
+                radius * math.sin(nextTheta) * math.sin(currentInclination),
+                radius * math.sin(nextTheta) * math.cos(currentInclination)
+            )
+            local lookDir = (nextPos - targetPos)
+            if lookDir.Magnitude > 0.01 then
+                local bg = myRoot:FindFirstChildOfClass("BodyGyro")
+                local faceCFrame = CFrame.lookAt(targetPos, nextPos)
+                if bg then
+                    bg.CFrame = faceCFrame
+                else
+                    bg = Instance.new("BodyGyro")
+                    bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                    bg.CFrame = faceCFrame
+                    bg.Parent = myRoot
+                end
+            end
+            
+            myHumanoid.PlatformStand = true
+
+        elseif CurrentMode == "ufo" then
+            -- UFO Formation: Alts form a flat disc directly below the main player's feet.
+            local isStriking = ActiveStrikes[altIndexOffset] ~= nil
+            
+            if isStriking then
+                -- ALREADY HANDLED below in the Strike block, skip standard formation
+            else
+                -- STANDARD UFO DISK
+                -- Distribute alts into concentric rings. Since max is 8, 
+                -- we can form one solid large ring of 8 for a perfect saucer.
+                local radius = (TotalAlts > 6) and 4 or 3 -- expand radius slightly if 7 or 8 alts
+                local ring = 1
+                local capacityInRing = (TotalAlts <= 8) and TotalAlts or 6
+                local indexInRing = altIndexOffset - 1
+                
+                while indexInRing >= capacityInRing do
+                    indexInRing = indexInRing - capacityInRing
+                    ring = ring + 1
+                    radius = radius + 3
+                    capacityInRing = math.floor(radius * 2 * math.pi / 2.5) -- roughly 2.5 studs between alts in a ring
+                end
+                
+                -- Calculate angle based on position in ring, plus a continuous rotation
+                local angle = (indexInRing / capacityInRing) * (math.pi * 2)
+                local timeSec = tick()
+                local spinSpeed = 1.5 -- radians per second
+                local currentAngle = angle + (timeSec * spinSpeed)
+                
+                local xOffset = math.cos(currentAngle) * radius
+                local zOffset = math.sin(currentAngle) * radius
+                local yOffset = -4.5 -- Beneath feet
+                
+                -- Position relative to leader's position (ignoring leader's rotation so the UFO spin is independent)
+                -- Forward prediction for replication lag
+                local velocity = targetRoot.AssemblyLinearVelocity
+                local horizontalVel = Vector3.new(velocity.X, 0, velocity.Z)
+                local forwardOffset = Vector3.zero
+                if horizontalVel.Magnitude > 0.5 then
+                    forwardOffset = horizontalVel * 0.5
+                end
+                
+                local targetPos = targetRoot.Position + Vector3.new(xOffset, yOffset, zOffset) + forwardOffset
+                
+                local bp = myRoot:FindFirstChildOfClass("BodyPosition")
+                if bp then
+                    bp.Position = targetPos
+                else
+                    bp = Instance.new("BodyPosition")
+                    bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                    bp.D = 2000
+                    bp.P = 50000
+                    bp.Position = targetPos
+                    bp.Parent = myRoot
+                end
+                local dirOut = Vector3.new(xOffset, 0, zOffset).Unit
+                if dirOut.Magnitude < 0.01 then dirOut = Vector3.new(0, 0, -1) end
+                local layingCFrame = CFrame.lookAt(targetPos, targetPos + dirOut) * CFrame.Angles(math.rad(90), 0, 0)
+                
+                local bg = myRoot:FindFirstChildOfClass("BodyGyro")
+                if bg then
+                    bg.CFrame = layingCFrame
+                else
+                    bg = Instance.new("BodyGyro")
+                    bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+                    bg.CFrame = layingCFrame
+                    bg.Parent = myRoot
+                end
+                
+                myHumanoid.PlatformStand = true
+            end
+            
+            -- STRIKE EXECUTION BLOCK (Runs if this alt is currently striking)
+            if ActiveStrikes[altIndexOffset] then
+                local strikeData = ActiveStrikes[altIndexOffset]
+                local tPlayer = Players:FindFirstChild(strikeData.targetName)
+                local tRoot = tPlayer and tPlayer.Character and tPlayer.Character:FindFirstChild("HumanoidRootPart")
+                
+                if not tRoot or (tPlayer.Character:FindFirstChildOfClass("Humanoid") and tPlayer.Character:FindFirstChildOfClass("Humanoid").Health <= 0) then
+                    -- Target dead or left, return
+                    ActiveStrikes[altIndexOffset] = nil
+                    local spinNode = myRoot:FindFirstChild("StrikeSpin")
+                    if spinNode then spinNode:Destroy() end
+                else
+                    if strikeData.phase == "homing" then
+                        -- Fly head first
+                        local outDir = (tRoot.Position - myRoot.Position).Unit
+                        local targetCFrame = CFrame.lookAt(myRoot.Position, tRoot.Position) * CFrame.Angles(math.rad(90), 0, 0)
+                        
+                        local bp = myRoot:FindFirstChildOfClass("BodyPosition")
+                        if bp then 
+                            -- Force them EXACTLY to the player's core to ensure collision
+                            bp.Position = tRoot.Position
+                        end
+                        
+                        local spinNode = myRoot:FindFirstChild("StrikeSpin")
+                        if not spinNode then
+                            spinNode = Instance.new("BodyAngularVelocity")
+                            spinNode.Name = "StrikeSpin"
+                            -- Spin on local Z axis using CFrame logic
+                            -- To make a robust spin, we spin global axes but heavily
+                            spinNode.AngularVelocity = outDir * 50 -- Spin around the flight axis
+                            spinNode.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+                            spinNode.P = 1e5
+                            spinNode.Parent = myRoot
+                        else
+                            spinNode.AngularVelocity = outDir * 50
+                        end
+                        -- Check if we hit them or timed out
+                        strikeData.timer = strikeData.timer + dt
+                        if (myRoot.Position - tRoot.Position).Magnitude < 4 or strikeData.timer > 3 then
+                            -- Done! Let it snap back to UFO slot natively
+                            ActiveStrikes[altIndexOffset] = nil
+                            if spinNode then spinNode:Destroy() end
+                        end
+                    end
+                end
+            end
+        end
+        
+        -- AUTO-JUMP OBSTACLE DETECTION
+        -- Only apply if we are actually trying to walk, and not in floating modes
+        if CurrentMode ~= "stack" and CurrentMode ~= "mech" and CurrentMode ~= "altmech" and CurrentMode ~= "elevator" and CurrentMode ~= "orbit" then
+            if myHumanoid.MoveDirection.Magnitude > 0.1 then
+                local currentPos = myRoot.Position
+                local distMoved = Vector3.new(currentPos.X - lastPos.X, 0, currentPos.Z - lastPos.Z).Magnitude
+                local expectedMove = myHumanoid.WalkSpeed * dt * 0.2 -- Give some grace period for slight turns/slopes
+                
+                if distMoved < expectedMove then
+                    stuckTimer = stuckTimer + dt
+                    if stuckTimer > 0.25 then -- If stuck for 0.25s, jump
+                        myHumanoid.Jump = true
+                        stuckTimer = 0
+                    end
+                else
+                    stuckTimer = 0
+                end
+                lastPos = currentPos
+            else
+                stuckTimer = 0
+                lastPos = myRoot.Position
+            end
+        end
+    end)
+
+elseif string.lower(LocalPlayer.Name) == string.lower(Config.MainAccount) then
+    -- === MAIN ACCOUNT ===
+    print("[Alt Controller] Main Account loaded.")
+    local commandBarInput, toggleBar, hideBar = CreateCommandBar()
+    
+    -- Mech state for main account
+    local mechActive = false
+    local MECH_ELEVATION = 8 -- Studs above ground (room for legs below)
+    local MECH_SPEED = 16
+    local mechMoveDir = Vector3.zero
+    
+    -- Strike round-robin counter
+    local nextStrikeAltIndex = 1
+    
+    -- OPT #4: Pre-create RaycastParams for mech ground detection (reused every frame)
+    local mechRayParams = RaycastParams.new()
+    mechRayParams.FilterType = Enum.RaycastFilterType.Exclude
+    
+    local function RefreshMechRayFilter()
+        local filterList = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.Character then
+                table.insert(filterList, p.Character)
+            end
+        end
+        mechRayParams.FilterDescendantsInstances = filterList
+    end
+    RefreshMechRayFilter()
+    
+    local function ActivateMechOnSelf()
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if root and hum then
+            hum.PlatformStand = true
+            RefreshMechRayFilter()
+            
+            -- Clean up old ones first
+            for _, obj in ipairs(root:GetChildren()) do
+                if obj:IsA("BodyPosition") or obj:IsA("BodyGyro") then obj:Destroy() end
+            end
+            
+            local bp = Instance.new("BodyPosition")
+            bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            bp.D = 2000
+            bp.P = 50000
+            bp.Position = root.Position + Vector3.new(0, MECH_ELEVATION, 0)
+            bp.Parent = root
+            
+            local bg = Instance.new("BodyGyro")
+            bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+            bg.CFrame = root.CFrame
+            bg.Parent = root
+            
+            mechActive = true
+            print("[Alt Controller] Mech: Owner elevated.")
+        end
+    end
+    
+    local function DeactivateMechOnSelf()
+        mechActive = false
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if root then
+            for _, obj in ipairs(root:GetChildren()) do
+                if obj:IsA("BodyPosition") or obj:IsA("BodyGyro") then obj:Destroy() end
+            end
+            root.Anchored = false
+        end
+        if hum then
+            hum.PlatformStand = false
+            hum.WalkSpeed = 16
+            hum.AutoRotate = true
+            if hum:GetState() == Enum.HumanoidStateType.PlatformStanding then
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+            end
+        end
+        print("[Alt Controller] Mech: Owner grounded.")
+    end
+    
+    -- Custom WASD movement for mech mode
+    local lastRayFilterRefresh = 0
+    
+    RunService.Heartbeat:Connect(function(dt)
+        if not mechActive then return end
+        
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not root or not hum or hum.Health <= 0 then return end
+        
+        local bp = root:FindFirstChildOfClass("BodyPosition")
+        local bg = root:FindFirstChildOfClass("BodyGyro")
+        if not bp or not bg then return end
+        
+        -- Throttle filter refresh to once per second instead of every frame
+        if tick() - lastRayFilterRefresh > 1 then
+            lastRayFilterRefresh = tick()
+            RefreshMechRayFilter()
+        end
+        
+        -- Read WASD input relative to camera
+        -- Skip if command bar is focused so typing doesn't move the mech
+        local moveDir = Vector3.zero
+        if not commandBarInput:IsFocused() then
+            local cam = workspace.CurrentCamera
+            local camLook = cam.CFrame.LookVector
+            local camRight = cam.CFrame.RightVector
+            
+            -- Flatten to XZ plane
+            camLook = Vector3.new(camLook.X, 0, camLook.Z)
+            if camLook.Magnitude > 0 then camLook = camLook.Unit end
+            camRight = Vector3.new(camRight.X, 0, camRight.Z)
+            if camRight.Magnitude > 0 then camRight = camRight.Unit end
+            
+            if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + camLook end
+            if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - camLook end
+            if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + camRight end
+            if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - camRight end
+        end
+        
+        if moveDir.Magnitude > 0 then
+            moveDir = moveDir.Unit
+        end
+        
+        -- OPT #4: Reuse RaycastParams (created once outside the loop)
+        local rayOrigin = Vector3.new(bp.Position.X, bp.Position.Y + 20, bp.Position.Z)
+        local rayResult = workspace:Raycast(rayOrigin, Vector3.new(0, -100, 0), mechRayParams)
+        local groundY = rayResult and rayResult.Position.Y or 0
+        
+        -- Move horizontally
+        local currentPos = bp.Position
+        local newX = currentPos.X + (moveDir.X * MECH_SPEED * dt)
+        local newZ = currentPos.Z + (moveDir.Z * MECH_SPEED * dt)
+        local newY = groundY + MECH_ELEVATION
+        
+        bp.Position = Vector3.new(newX, newY, newZ)
+        
+        -- Face movement direction
+        if moveDir.Magnitude > 0 then
+            bg.CFrame = CFrame.lookAt(root.Position, root.Position + moveDir)
+        end
+        
+        -- Keep PlatformStand active
+        hum.PlatformStand = true
+    end)
+    
+    -- ========== ELEVATOR STATE ==========
+    local elevatorActive = false
+    local carpetActive = false
+    local ELEVATOR_RISE_SPEED = 3 -- Studs per second
+    local CARPET_SPEED = 35
+    local elevatorElevation = 0
+    
+    local function ActivateElevatorOnSelf(isCarpet)
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if root and hum then
+            hum.PlatformStand = true
+            
+            for _, obj in ipairs(root:GetChildren()) do
+                if obj:IsA("BodyPosition") or obj:IsA("BodyGyro") then obj:Destroy() end
+            end
+            
+            elevatorElevation = 0
+            
+            local bp = Instance.new("BodyPosition")
+            bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            bp.D = 2000
+            bp.P = 50000
+            -- Elevate slightly initially for carpet so you aren't stuck in ground
+            bp.Position = root.Position + (isCarpet and Vector3.new(0, 5, 0) or Vector3.new(0, 0, 0))
+            bp.Parent = root
+            
+            local bg = Instance.new("BodyGyro")
+            bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+            bg.CFrame = root.CFrame
+            bg.Parent = root
+            
+            if isCarpet then
+                carpetActive = true
+                print("[Alt Controller] Carpet: Flying mode engaged.")
+            else
+                elevatorActive = true
+                print("[Alt Controller] Elevator: Rising!")
+            end
+        end
+    end
+    
+    local function DeactivateElevatorOnSelf()
+        elevatorActive = false
+        carpetActive = false
+        elevatorElevation = 0
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if root then
+            for _, obj in ipairs(root:GetChildren()) do
+                if obj:IsA("BodyPosition") or obj:IsA("BodyGyro") then obj:Destroy() end
+            end
+            root.Anchored = false
+        end
+        if hum then
+            hum.PlatformStand = false
+            hum.WalkSpeed = 16
+            hum.AutoRotate = true
+            hum:SetStateEnabled(Enum.HumanoidStateType.Seated, true) -- Re-enable sitting
+            if hum:GetState() == Enum.HumanoidStateType.PlatformStanding or hum.Sit then
+                hum.Sit = false
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+            end
+        end
+        print("[Alt Controller] Elevator/Carpet: Grounded.")
+    end
+    
+    -- Elevator/Carpet Flight Heartbeat
+    RunService.Heartbeat:Connect(function(dt)
+        if not elevatorActive and not carpetActive then return end
+        
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not root or not hum or hum.Health <= 0 then return end
+        
+        local bp = root:FindFirstChildOfClass("BodyPosition")
+        local bg = root:FindFirstChildOfClass("BodyGyro")
+        if not bp or not bg then return end
+        
+        if elevatorActive then
+            -- Slowly rise
+            elevatorElevation = elevatorElevation + (ELEVATOR_RISE_SPEED * dt)
+            
+            if tick() - lastRayFilterRefresh > 1 then
+                lastRayFilterRefresh = tick()
+                RefreshMechRayFilter()
+            end
+            local rayOrigin = Vector3.new(root.Position.X, root.Position.Y + 20, root.Position.Z)
+            local rayResult = workspace:Raycast(rayOrigin, Vector3.new(0, -100, 0), mechRayParams)
+            local groundY = rayResult and rayResult.Position.Y or 0
+            
+            bp.Position = Vector3.new(root.Position.X, groundY + elevatorElevation + 3, root.Position.Z)
+        
+        elseif carpetActive then
+            -- Free 3D flight (like noclip/admin fly)
+            local moveDir = Vector3.zero
+            local verticalDir = 0
+            
+            if not commandBarInput:IsFocused() then
+                local cam = workspace.CurrentCamera
+                local camLook = cam.CFrame.LookVector
+                local camRight = cam.CFrame.RightVector
+                
+                -- Allow pitching up/down by using full LookVector instead of flattened XZ
+                if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + camLook end
+                if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - camLook end
+                if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + camRight end
+                if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - camRight end
+                
+                if UserInputService:IsKeyDown(Enum.KeyCode.Space) then verticalDir = verticalDir + 1 end
+                if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then verticalDir = verticalDir - 1 end
+            end
+            
+            if moveDir.Magnitude > 0 then
+                moveDir = moveDir.Unit
+            end
+            
+            local currentPos = bp.Position
+            local newPos = currentPos + (moveDir * CARPET_SPEED * dt) + Vector3.new(0, verticalDir * CARPET_SPEED * dt, 0)
+            bp.Position = newPos
+            
+            -- Rotate facing direction, but stay upright (don't pitch the body forward)
+            if moveDir.Magnitude > 0 then
+                local flatLook = Vector3.new(moveDir.X, 0, moveDir.Z)
+                if flatLook.Magnitude > 0 then
+                    bg.CFrame = CFrame.lookAt(root.Position, root.Position + flatLook)
+                end
+            end
+        end
+        
+        hum.PlatformStand = true
+    end)
+    
+    -- Clean up mech/elevator/carpet on death/respawn
+    LocalPlayer.CharacterAdded:Connect(function()
+        if mechActive then
+            mechActive = false
+            print("[Alt Controller] Mech: Respawned, mech deactivated.")
+        end
+        if elevatorActive or carpetActive then
+            elevatorActive = false
+            carpetActive = false
+            elevatorElevation = 0
+            print("[Alt Controller] Elevator/Carpet: Respawned, deactivated.")
+        end
+    end)
+    
+    -- Quick notification helper (shows text near command bar briefly)
+    local function ShowNotification(msg)
+        print("[Alt Controller] " .. msg)
+        local screenGui = commandBarInput.Parent and commandBarInput.Parent.Parent
+        if not screenGui then return end
+        
+        local existing = screenGui:FindFirstChild("AltNotify")
+        if existing then existing:Destroy() end
+        
+        local label = Instance.new("TextLabel")
+        label.Name = "AltNotify"
+        label.Size = UDim2.new(0, 400, 0, 30)
+        label.Position = UDim2.new(0.5, -200, 1, -140)
+        label.BackgroundTransparency = 0.3
+        label.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        label.TextColor3 = Color3.fromRGB(100, 255, 100)
+        label.Font = Enum.Font.GothamMedium
+        label.TextSize = 14
+        label.Text = msg
+        label.Parent = screenGui
+        Instance.new("UICorner", label).CornerRadius = UDim.new(0, 6)
+        
+        task.delay(3, function()
+            if label.Parent then label:Destroy() end
+        end)
+    end
+    
+    local function HandleMainCmd(cmdText)
+        local cmdLower = string.lower(string.match(cmdText, "^%s*(.-)%s*$"))
+        if cmdLower == "cmds" then
+            ShowCommandsGUI()
+            return true
+        end
+        
+        -- Mech: activate on self AND broadcast to alts
+        -- "mech p" = passive mode (alts form mech but you walk normally)
+        if string.sub(cmdLower, 1, 8) == "alt mech" or string.sub(cmdLower, 1, 7) == "altmech" then
+            DeactivateElevatorOnSelf() -- Clean up elevator if active
+            DeactivateMechOnSelf() -- Stay grounded
+            local argStr = cmdLower:find("^alt mech") and string.match(string.sub(cmdLower, 9), "^%s*(.-)%s*$") or string.match(string.sub(cmdLower, 8), "^%s*(.-)%s*$")
+            if argStr and argStr ~= "" then
+                ShowNotification("Alt Mech: Formation following " .. argStr)
+            else
+                ShowNotification("Alt Mech: Formation following behind you.")
+            end
+            return false -- Still broadcast to alts
+        end
+        
+        if string.sub(cmdLower, 1, 4) == "mech" then
+            DeactivateElevatorOnSelf() -- Clean up elevator if active
+            if cmdLower ~= "mech p" then
+                ActivateMechOnSelf()
+            else
+                DeactivateMechOnSelf() -- Make sure we're grounded
+                ShowNotification("Mech Passive: Alts forming around you.")
+            end
+            return false -- Still broadcast to alts
+        end
+        
+        -- Elevator, Carpet & UFO: activate on self AND broadcast to alts
+        if cmdLower == "elevator" then
+            DeactivateMechOnSelf()
+            ActivateElevatorOnSelf(false)
+            return false -- Still broadcast to alts
+        end
+        
+        if cmdLower == "carpet" or cmdLower == "aladdin" then
+            DeactivateMechOnSelf()
+            ActivateElevatorOnSelf(true)
+            return false
+        end
+
+        if cmdLower == "ufo" then
+            DeactivateMechOnSelf()
+            ActivateElevatorOnSelf(true)
+            CurrentMode = "ufo" -- Track locally for the sit mechanic
+            return false
+        end
+        
+
+        
+        -- Strike: intercept and assign a specific alt index
+        if string.sub(cmdLower, 1, 6) == "strike" then
+            local argStr = string.match(string.sub(cmdText, 7), "^%s*(.-)%s*$")
+            if argStr and argStr ~= "" then
+                -- Broadcast with the assigned alt index appended
+                BroadcastCmdInvisible("strike " .. argStr .. " __idx" .. tostring(nextStrikeAltIndex))
+                ShowNotification("Strike sent! Alt #" .. nextStrikeAltIndex .. " -> " .. argStr)
+                nextStrikeAltIndex = nextStrikeAltIndex + 1
+                if nextStrikeAltIndex > TotalAlts then
+                    nextStrikeAltIndex = 1
+                end
+            end
+            return true -- Already broadcast manually, don't double-send
+        end
+        
+        -- Stop: deactivate everything AND broadcast to alts
+        if cmdLower == "stop" then
+            DeactivateMechOnSelf()
+            DeactivateElevatorOnSelf()
+            nextStrikeAltIndex = 1 -- Reset strike counter
+
+            return false -- Still broadcast to alts
+        end
+        
+        return false
+    end
+    
+    commandBarInput.FocusLost:Connect(function(enterPressed)
+        local cmd = commandBarInput.Text
+        hideBar() -- Hide immediately so the UI is always snappy
+        
+        if enterPressed and cmd ~= "" then
+            task.spawn(function()
+                if not HandleMainCmd(cmd) then
+                    BroadcastCmdInvisible(cmd)
+                end
+            end)
+        end
+    end)
+else
+    warn("[Alt Controller] Account (" .. LocalPlayer.Name .. ") not in config. Script dormant.")
+end
+
+-- ==========================================
+-- ANTI AFK
+-- ==========================================
+local VirtualUser = game:GetService("VirtualUser")
+LocalPlayer.Idled:Connect(function()
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+    print("[Alt Controller] Anti-AFK triggered.")
+end)
