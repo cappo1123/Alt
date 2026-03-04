@@ -109,11 +109,13 @@ do
 end
 
 local function StopAllActions()
+    local wasActive = (CurrentMode ~= "none")
     CurrentMode = "none"
     ScatterTarget = nil
     TargetBreadcrumbs = {}
     wasMoving = false
 
+    if not wasActive then return end -- Skip expensive cleanup if already idle
     
     local myCharacter = LocalPlayer.Character
     if myCharacter then
@@ -278,290 +280,363 @@ local function ShowCommandsGUI()
     end)
 end
 
-local function ProcessCommand(cmd)
-    cmd = string.match(cmd, "^%s*(.-)%s*$") -- trim
-    local cmdLower = string.lower(cmd)
+-- Helper: Parse argument starting at character index idx
+local function ParseArg(cmd, idx)
+    return string.match(string.sub(cmd, idx), "^%s*(.-)%s*$")
+end
 
-    if cmdLower == "cmds" then
-        ShowCommandsGUI()
-        return
-    end
-
-    -- JUMP
-    if cmdLower == "jump" then
-        local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-        end
-        print("[Alt Controller] Jumped!")
-        return
-    end
-    
-    -- STOP
-    if cmdLower == "stop" then
-        StopAllActions()
-        print("[Alt Controller] Stopped all actions.")
-        return
-    end
-
-    -- RESET (respawns the character)
-    if cmdLower == "reset" then
-        StopAllActions()
-        if LocalPlayer.Character then
-            local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-            if humanoid then
-                humanoid.Health = 0
-            end
-        end
-        print("[Alt Controller] Resetting character...")
-        return
-    end
-
-    -- CHAT
-    if string.sub(cmdLower, 1, 4) == "chat" then
-        local chatMsg = string.match(string.sub(cmd, 5), "^%s*(.-)%s*$")
-        if chatMsg and chatMsg ~= "" then
-            local TextChatService = game:GetService("TextChatService")
-            local ReplicatedStorage = game:GetService("ReplicatedStorage")
-            if TextChatService and TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
-                pcall(function() TextChatService.TextChannels.RBXGeneral:SendAsync(chatMsg) end)
-            elseif ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents") then
-                pcall(function() ReplicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(chatMsg, "All") end)
-            end
-            print("[Alt Controller] Said: " .. chatMsg)
-        end
-        return
-    end
-
-    -- BRING
-    if string.sub(cmdLower, 1, 5) == "bring" then
-        StopAllActions()
-        print("[Alt Controller] Bringing alt to Main Account...")
-        
-        local leaderPlayer = FindPlayer(Config.MainAccount)
-        if leaderPlayer and leaderPlayer.Character and leaderPlayer.Character:FindFirstChild("HumanoidRootPart") then
-            local leaderRoot = leaderPlayer.Character.HumanoidRootPart
-            if LocalPlayer.Character then
-                -- Add a small random offset so they don't all teleport into the exact same point and fling
-                local offset = Vector3.new(math.random(-3, 3), 0, math.random(-3, 3))
-                LocalPlayer.Character:PivotTo(leaderRoot.CFrame * CFrame.new(offset))
-            end
-        else
-            print("[Alt Controller] Main Account not found or missing character.")
-        end
-        return
-    end
-
-    local function ParseArg(idx)
-        return string.match(string.sub(cmd, idx), "^%s*(.-)%s*$")
-    end
-
-    local function ApplyModeSetup(modeName)
-        CurrentMode = modeName
-        local char = LocalPlayer.Character
-        if char then
-            for _, child in ipairs(char:GetChildren()) do
-                if child:IsA("BasePart") then
-                    child.CanCollide = false
-                elseif child:IsA("Accessory") then
-                    local handle = child:FindFirstChild("Handle")
-                    if handle and handle:IsA("BasePart") then
-                        handle.CanCollide = false
-                    end
+-- Helper: Apply standard mode setup (set mode + disable collisions)
+local function ApplyModeSetup(modeName)
+    CurrentMode = modeName
+    local char = LocalPlayer.Character
+    if char then
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("BasePart") then
+                child.CanCollide = false
+            elseif child:IsA("Accessory") then
+                local handle = child:FindFirstChild("Handle")
+                if handle and handle:IsA("BasePart") then
+                    handle.CanCollide = false
                 end
             end
         end
     end
+end
 
-    -- WORM
-    if string.sub(cmdLower, 1, 4) == "worm" then
-        StopAllActions()
-        ApplyModeSetup("worm")
-        local argStr = ParseArg(5)
-
-        if argStr == "" then
-            CommandLeader = Config.MainAccount
-            print("[Alt Controller] Worm ON (tracking Main Account).")
-        else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then
-                CommandLeader = targetPlayer.Name
-                print("[Alt Controller] Worm target -> " .. targetPlayer.Name)
-            end
-        end
-        UpdateFollowTarget()
-        return
-    end
-
-    -- VFORM
-    if string.sub(cmdLower, 1, 5) == "vform" then
-        StopAllActions()
-        ApplyModeSetup("vform")
-        local argStr = ParseArg(6)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        print("[Alt Controller] V-Formation ON.")
-        return
-    elseif string.sub(cmdLower, 1, 6) == "vshape" then
-        StopAllActions()
-        ApplyModeSetup("vform")
-        local argStr = ParseArg(7)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        print("[Alt Controller] V-Formation ON.")
-        return
-    end
-
-    -- ARMY
-    if string.sub(cmdLower, 1, 4) == "army" then
-        StopAllActions()
-        ApplyModeSetup("army")
-        local argStr = ParseArg(5)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        print("[Alt Controller] Army March ON.")
-        return
-    end
-
-    -- FLANK
-    if string.sub(cmdLower, 1, 5) == "flank" then
-        StopAllActions()
-        ApplyModeSetup("flank")
-        local argStr = ParseArg(6)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        print("[Alt Controller] Flank Formation ON.")
-        return
-    end
-    
-    -- CIRCLE IN
-    if string.sub(cmdLower, 1, 8) == "circlein" or string.sub(cmdLower, 1, 9) == "circle in" then
-        StopAllActions()
-        ApplyModeSetup("circlein")
-        local argStr = cmdLower:find("^circlein") and ParseArg(9) or ParseArg(10)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        print("[Alt Controller] Circle In ON.")
-        return
-    end
-
-    -- CIRCLE OUT
-    if string.sub(cmdLower, 1, 9) == "circleout" or string.sub(cmdLower, 1, 10) == "circle out" then
-        StopAllActions()
-        ApplyModeSetup("circleout")
-        local argStr = cmdLower:find("^circleout") and ParseArg(10) or ParseArg(11)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        print("[Alt Controller] Circle Out ON.")
-        return
-    end
-
-    -- SPIN
-    if string.sub(cmdLower, 1, 4) == "spin" then
-        StopAllActions()
-        ApplyModeSetup("spin")
-        local argStr = ParseArg(5)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        print("[Alt Controller] Spinning around -> " .. tostring(CommandLeader))
-        return
-    end
-
-    -- SWARM
-    if string.sub(cmdLower, 1, 5) == "swarm" then
-        StopAllActions()
-        ApplyModeSetup("swarm")
-        local argStr = ParseArg(6)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        print("[Alt Controller] Swarming -> " .. tostring(CommandLeader))
-        return
-    end
-
-    -- BODYGUARD
-    if string.sub(cmdLower, 1, 9) == "bodyguard" then
-        StopAllActions()
-        ApplyModeSetup("bodyguard")
-        local argStr = ParseArg(10)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        print("[Alt Controller] Bodyguard mode ON for -> " .. tostring(CommandLeader))
-        return
-    end
-
-    -- STACK
-    if string.sub(cmdLower, 1, 5) == "stack" then
-        StopAllActions()
-        ApplyModeSetup("stack")
-        local argStr = ParseArg(6)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        
-        -- Set up PlatformStand + BodyPosition immediately
-        local myCharacter = LocalPlayer.Character
-        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
-        if myRoot and myHumanoid then
-            myHumanoid.PlatformStand = true
-            
-            -- Create BodyPosition if it doesn't exist
-            if not myRoot:FindFirstChildOfClass("BodyPosition") then
-                local bp = Instance.new("BodyPosition")
+-- Helper: Set up PlatformStand + BodyPosition + BodyGyro with high-force physics
+local function SetupFloatingBody(useHighForce)
+    local myCharacter = LocalPlayer.Character
+    local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+    local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+    if myRoot and myHumanoid then
+        myHumanoid.PlatformStand = true
+        if not myRoot:FindFirstChildOfClass("BodyPosition") then
+            local bp = Instance.new("BodyPosition")
+            if useHighForce then
+                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bp.D = 2000
+                bp.P = 50000
+            else
                 bp.MaxForce = Vector3.new(1e6, 1e6, 1e6)
                 bp.D = 500
                 bp.P = 5000
-                bp.Position = myRoot.Position
-                bp.Parent = myRoot
             end
-            
-            -- Create BodyGyro to keep them upright
-            if not myRoot:FindFirstChildOfClass("BodyGyro") then
-                local bg = Instance.new("BodyGyro")
-                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-                bg.CFrame = myRoot.CFrame
-                bg.Parent = myRoot
-            end
+            bp.Position = myRoot.Position
+            bp.Parent = myRoot
         end
-        
-        print("[Alt Controller] Stack ON -> " .. tostring(CommandLeader))
+        if not myRoot:FindFirstChildOfClass("BodyGyro") then
+            local bg = Instance.new("BodyGyro")
+            bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+            bg.CFrame = myRoot.CFrame
+            bg.Parent = myRoot
+        end
+    end
+end
+
+-- Helper: Standard mode with optional leader + follow target
+local function SetupFormation(cmd, modeName, argStartIdx, logMsg)
+    StopAllActions()
+    ApplyModeSetup(modeName)
+    local argStr = ParseArg(cmd, argStartIdx)
+    if argStr == "" then CommandLeader = Config.MainAccount else
+        local targetPlayer = FindPlayer(argStr)
+        if targetPlayer then CommandLeader = targetPlayer.Name end
+    end
+    UpdateFollowTarget()
+    print("[Alt Controller] " .. logMsg)
+end
+
+-- ========== COMMAND LOOKUP TABLE (O(1) dispatch) ==========
+-- Exact-match commands (fastest path)
+local ExactCommands = {}
+
+ExactCommands["cmds"] = function(cmd) ShowCommandsGUI() end
+
+ExactCommands["jump"] = function(cmd)
+    local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if humanoid then humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end
+    print("[Alt Controller] Jumped!")
+end
+
+ExactCommands["stop"] = function(cmd)
+    StopAllActions()
+    print("[Alt Controller] Stopped all actions.")
+end
+
+ExactCommands["reset"] = function(cmd)
+    StopAllActions()
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then humanoid.Health = 0 end
+    end
+    print("[Alt Controller] Resetting character...")
+end
+
+ExactCommands["elevator"] = function(cmd)
+    StopAllActions()
+    ApplyModeSetup("elevator")
+    CommandLeader = Config.MainAccount
+    UpdateFollowTarget()
+    SetupFloatingBody(true)
+    print("[Alt Controller] Elevator ON.")
+end
+
+ExactCommands["carpet"] = function(cmd)
+    StopAllActions()
+    ApplyModeSetup("carpet")
+    CommandLeader = Config.MainAccount
+    UpdateFollowTarget()
+    SetupFloatingBody(true)
+    print("[Alt Controller] Carpet ON.")
+end
+
+ExactCommands["aladdin"] = ExactCommands["carpet"]
+
+ExactCommands["ufo"] = function(cmd)
+    StopAllActions()
+    ApplyModeSetup("ufo")
+    CommandLeader = Config.MainAccount
+    UpdateFollowTarget()
+    SetupFloatingBody(true)
+    print("[Alt Controller] UFO ON.")
+end
+
+-- Prefix commands: checked by first word, receive full original cmd
+-- { prefix, length, handler }
+-- Ordered by most commonly used first for marginal speed
+local PrefixCommands = {}
+
+PrefixCommands["chat"] = function(cmd, cmdLower)
+    local chatMsg = string.match(string.sub(cmd, 5), "^%s*(.-)%s*$")
+    if chatMsg and chatMsg ~= "" then
+        local TextChatService = game:GetService("TextChatService")
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        if TextChatService and TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+            pcall(function() TextChatService.TextChannels.RBXGeneral:SendAsync(chatMsg) end)
+        elseif ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents") then
+            pcall(function() ReplicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(chatMsg, "All") end)
+        end
+        print("[Alt Controller] Said: " .. chatMsg)
+    end
+end
+
+PrefixCommands["bring"] = function(cmd, cmdLower)
+    StopAllActions()
+    print("[Alt Controller] Bringing alt to Main Account...")
+    local leaderPlayer = FindPlayer(Config.MainAccount)
+    if leaderPlayer and leaderPlayer.Character and leaderPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        local leaderRoot = leaderPlayer.Character.HumanoidRootPart
+        if LocalPlayer.Character then
+            local offset = Vector3.new(math.random(-3, 3), 0, math.random(-3, 3))
+            LocalPlayer.Character:PivotTo(leaderRoot.CFrame * CFrame.new(offset))
+        end
+    else
+        print("[Alt Controller] Main Account not found or missing character.")
+    end
+end
+
+PrefixCommands["worm"] = function(cmd, cmdLower)
+    StopAllActions()
+    ApplyModeSetup("worm")
+    local argStr = ParseArg(cmd, 5)
+    if argStr == "" then
+        CommandLeader = Config.MainAccount
+        print("[Alt Controller] Worm ON (tracking Main Account).")
+    else
+        local targetPlayer = FindPlayer(argStr)
+        if targetPlayer then
+            CommandLeader = targetPlayer.Name
+            print("[Alt Controller] Worm target -> " .. targetPlayer.Name)
+        end
+    end
+    UpdateFollowTarget()
+end
+
+PrefixCommands["vform"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "vform", 6, "V-Formation ON.")
+end
+
+PrefixCommands["vshape"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "vform", 7, "V-Formation ON.")
+end
+
+PrefixCommands["army"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "army", 5, "Army March ON.")
+end
+
+PrefixCommands["flank"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "flank", 6, "Flank Formation ON.")
+end
+
+PrefixCommands["circlein"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "circlein", 9, "Circle In ON.")
+end
+
+PrefixCommands["circleout"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "circleout", 10, "Circle Out ON.")
+end
+
+PrefixCommands["spin"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "spin", 5, "Spinning around -> " .. tostring(CommandLeader))
+end
+
+PrefixCommands["swarm"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "swarm", 6, "Swarming -> " .. tostring(CommandLeader))
+end
+
+PrefixCommands["bodyguard"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "bodyguard", 10, "Bodyguard mode ON for -> " .. tostring(CommandLeader))
+end
+
+PrefixCommands["stack"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "stack", 6, "Stack ON -> " .. tostring(CommandLeader))
+    SetupFloatingBody(false)
+end
+
+PrefixCommands["stalk"] = function(cmd, cmdLower)
+    StopAllActions()
+    ApplyModeSetup("stalk")
+    CommandLeader = Config.MainAccount
+    UpdateFollowTarget()
+    print("[Alt Controller] Stalk ON — each alt tailing a different player.")
+end
+
+PrefixCommands["allfling"] = function(cmd, cmdLower)
+    StopAllActions()
+    ApplyModeSetup("allfling")
+    CommandLeader = Config.MainAccount
+    UpdateFollowTarget()
+    print("[Alt Controller] All Fling ON — targeting everyone.")
+end
+
+PrefixCommands["fling"] = function(cmd, cmdLower)
+    local argStr = ParseArg(cmd, 6)
+    if argStr ~= "" then
+        local targetPlayer = FindPlayer(argStr)
+        if targetPlayer then
+            SingleFlingTarget = targetPlayer.Name
+            print("[Alt Controller] Assassin Fling sent against: " .. targetPlayer.Name)
+        end
+    else
+        SingleFlingTarget = nil
+        print("[Alt Controller] Assassin Fling cancelled.")
+    end
+end
+
+PrefixCommands["scatter"] = function(cmd, cmdLower)
+    StopAllActions()
+    ApplyModeSetup("scatter")
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        local pos = LocalPlayer.Character.HumanoidRootPart.Position
+        ScatterTarget = pos + Vector3.new(math.random(-500, 500), 0, math.random(-500, 500))
+    end
+    print("[Alt Controller] Scattering!")
+end
+
+PrefixCommands["panic"] = PrefixCommands["scatter"]
+
+PrefixCommands["orbit"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "orbit", 6, "Orbit ON -> " .. tostring(CommandLeader))
+    SetupFloatingBody(true)
+end
+
+PrefixCommands["tornado"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "tornado", 8, "Tornado ON -> " .. tostring(CommandLeader))
+    local myCharacter = LocalPlayer.Character
+    local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+    if myHumanoid then
+        myHumanoid.WalkSpeed = 50
+        myHumanoid.HipHeight = 0.5
+    end
+end
+
+PrefixCommands["haunted"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "haunted", 8, "Haunted ON -> " .. tostring(CommandLeader))
+    hauntedPhase = "idle"
+    hauntedTimer = math.random() * 5 + 2
+end
+
+PrefixCommands["haunt"] = function(cmd, cmdLower)
+    SetupFormation(cmd, "haunted", 7, "Haunted ON -> " .. tostring(CommandLeader))
+    hauntedPhase = "idle"
+    hauntedTimer = math.random() * 5 + 2
+end
+
+PrefixCommands["strike"] = function(cmd, cmdLower)
+    local fullArg = ParseArg(cmd, 7)
+    if fullArg ~= "" then
+        local playerName, assignedIdx = string.match(fullArg, "^(.-)%s+__idx(%d+)$")
+        if not playerName or playerName == "" then
+            playerName = string.match(fullArg, "^(.-)%s*$")
+            assignedIdx = 1
+        else
+            playerName = string.match(playerName, "^%s*(.-)%s*$")
+            assignedIdx = tonumber(assignedIdx)
+        end
+        local targetPlayer = FindPlayer(playerName)
+        local altIndexOffset = math.max(1, MyIndex - 1)
+        if targetPlayer and altIndexOffset == assignedIdx then
+            ActiveStrikes[altIndexOffset] = {
+                targetName = targetPlayer.Name,
+                timer = 0,
+                phase = "homing"
+            }
+            print("[Alt Controller] I am striking: " .. targetPlayer.Name)
+        end
+    end
+end
+
+PrefixCommands["mech"] = function(cmd, cmdLower)
+    StopAllActions()
+    ApplyModeSetup("mech")
+    local argStr = ParseArg(cmd, 5)
+    if argStr == "" then CommandLeader = Config.MainAccount else
+        local targetPlayer = FindPlayer(argStr)
+        if targetPlayer then CommandLeader = targetPlayer.Name end
+    end
+    UpdateFollowTarget()
+    local myOffset = math.max(1, MyIndex - 1)
+    if myOffset <= 7 then SetupFloatingBody(true) end
+    print("[Alt Controller] Mech ON -> " .. tostring(CommandLeader))
+end
+
+local function ProcessCommand(cmd)
+    cmd = string.match(cmd, "^%s*(.-)%s*$") -- trim
+    local cmdLower = string.lower(cmd)
+
+    -- 1. Try exact match first (O(1) hash lookup)
+    local exactHandler = ExactCommands[cmdLower]
+    if exactHandler then
+        exactHandler(cmd)
         return
     end
 
-    -- MECH
-    if string.sub(cmdLower, 1, 8) == "alt mech" or string.sub(cmdLower, 1, 7) == "altmech" then
+    -- 2. Extract first word for prefix matching
+    local firstWord = string.match(cmdLower, "^(%S+)")
+    if not firstWord then return end
+    
+    -- Special multi-word commands that need priority
+    if firstWord == "alt" then
+        if string.sub(cmdLower, 1, 8) == "alt mech" or string.sub(cmdLower, 1, 7) == "altmech" then
+            StopAllActions()
+            ApplyModeSetup("altmech")
+            local argStr = cmdLower:find("^alt mech") and ParseArg(cmd, 9) or ParseArg(cmd, 8)
+            if argStr == "" then
+                CommandLeader = Config.MainAccount
+            else
+                local targetPlayer = FindPlayer(argStr)
+                if targetPlayer then CommandLeader = targetPlayer.Name end
+            end
+            UpdateFollowTarget()
+            local myOffset = math.max(1, MyIndex - 1)
+            if myOffset <= 7 then SetupFloatingBody(true) end
+            print("[Alt Controller] Alt Mech ON -> " .. tostring(CommandLeader))
+            return
+        end
+    elseif firstWord == "altmech" then
         StopAllActions()
         ApplyModeSetup("altmech")
-        local argStr = cmdLower:find("^alt mech") and ParseArg(9) or ParseArg(8)
+        local argStr = ParseArg(cmd, 8)
         if argStr == "" then
             CommandLeader = Config.MainAccount
         else
@@ -569,345 +644,27 @@ local function ProcessCommand(cmd)
             if targetPlayer then CommandLeader = targetPlayer.Name end
         end
         UpdateFollowTarget()
-        
-        -- Set up PlatformStand + BodyPosition for the first 7 alts (mech body slots)
-        local myCharacter = LocalPlayer.Character
-        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
         local myOffset = math.max(1, MyIndex - 1)
-        if myRoot and myHumanoid and myOffset <= 7 then
-            myHumanoid.PlatformStand = true
-            
-            if not myRoot:FindFirstChildOfClass("BodyPosition") then
-                local bp = Instance.new("BodyPosition")
-                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-                bp.D = 2000
-                bp.P = 50000
-                bp.Position = myRoot.Position
-                bp.Parent = myRoot
-            end
-            
-            if not myRoot:FindFirstChildOfClass("BodyGyro") then
-                local bg = Instance.new("BodyGyro")
-                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-                bg.CFrame = myRoot.CFrame
-                bg.Parent = myRoot
-            end
-        end
-        
+        if myOffset <= 7 then SetupFloatingBody(true) end
         print("[Alt Controller] Alt Mech ON -> " .. tostring(CommandLeader))
         return
+    elseif firstWord == "all" and (cmdLower == "all fling" or string.sub(cmdLower, 1, 9) == "all fling") then
+        PrefixCommands["allfling"](cmd, cmdLower)
+        return
+    elseif firstWord == "circle" then
+        if string.sub(cmdLower, 1, 9) == "circle in" then
+            SetupFormation(cmd, "circlein", 10, "Circle In ON.")
+            return
+        elseif string.sub(cmdLower, 1, 10) == "circle out" then
+            SetupFormation(cmd, "circleout", 11, "Circle Out ON.")
+            return
+        end
     end
 
-    if string.sub(cmdLower, 1, 4) == "mech" then
-        StopAllActions()
-        ApplyModeSetup("mech")
-        local argStr = ParseArg(5)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        
-        -- Only set up PlatformStand + BodyPosition for the first 7 alts (mech body slots)
-        local myCharacter = LocalPlayer.Character
-        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
-        local myOffset = math.max(1, MyIndex - 1)
-        if myRoot and myHumanoid and myOffset <= 7 then
-            myHumanoid.PlatformStand = true
-            
-            if not myRoot:FindFirstChildOfClass("BodyPosition") then
-                local bp = Instance.new("BodyPosition")
-                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-                bp.D = 2000
-                bp.P = 50000
-                bp.Position = myRoot.Position
-                bp.Parent = myRoot
-            end
-            
-            if not myRoot:FindFirstChildOfClass("BodyGyro") then
-                local bg = Instance.new("BodyGyro")
-                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-                bg.CFrame = myRoot.CFrame
-                bg.Parent = myRoot
-            end
-        end
-        
-        print("[Alt Controller] Mech ON -> " .. tostring(CommandLeader))
-        return
-    end
-
-    -- STALK
-    if string.sub(cmdLower, 1, 5) == "stalk" then
-        StopAllActions()
-        ApplyModeSetup("stalk")
-        CommandLeader = Config.MainAccount
-        UpdateFollowTarget()
-        print("[Alt Controller] Stalk ON — each alt tailing a different player.")
-        return
-    end
-
-    -- ALL FLING
-    if string.sub(cmdLower, 1, 8) == "allfling" or string.sub(cmdLower, 1, 9) == "all fling" then
-        StopAllActions()
-        ApplyModeSetup("allfling")
-        CommandLeader = Config.MainAccount
-        UpdateFollowTarget()
-        print("[Alt Controller] All Fling ON — targeting everyone.")
-        return
-    end
-
-    -- FLING [USER] (Assassin Override - Does not break formations)
-    if string.sub(cmdLower, 1, 5) == "fling" and cmdLower ~= "allfling" and cmdLower ~= "all fling" then
-        local argStr = ParseArg(6)
-        if argStr ~= "" then
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then
-                SingleFlingTarget = targetPlayer.Name
-                print("[Alt Controller] Assassin Fling sent against: " .. targetPlayer.Name)
-            end
-        else
-            SingleFlingTarget = nil
-            print("[Alt Controller] Assassin Fling cancelled.")
-        end
-        return
-    end
-
-    -- SCATTER
-    if string.sub(cmdLower, 1, 7) == "scatter" then
-        StopAllActions()
-        ApplyModeSetup("scatter")
-        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-            local pos = LocalPlayer.Character.HumanoidRootPart.Position
-            ScatterTarget = pos + Vector3.new(math.random(-500, 500), 0, math.random(-500, 500))
-        end
-        print("[Alt Controller] Scattering!")
-        return
-    elseif string.sub(cmdLower, 1, 5) == "panic" then
-        StopAllActions()
-        ApplyModeSetup("scatter")
-        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-            local pos = LocalPlayer.Character.HumanoidRootPart.Position
-            ScatterTarget = pos + Vector3.new(math.random(-500, 500), 0, math.random(-500, 500))
-        end
-        print("[Alt Controller] Scattering!")
-        return
-    end
-    
-    -- ELEVATOR
-    if cmdLower == "elevator" then
-        StopAllActions()
-        ApplyModeSetup("elevator")
-        CommandLeader = Config.MainAccount
-        UpdateFollowTarget()
-        
-        -- Set up PlatformStand + BodyPosition (like stack)
-        local myCharacter = LocalPlayer.Character
-        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
-        if myRoot and myHumanoid then
-            myHumanoid.PlatformStand = true
-            
-            if not myRoot:FindFirstChildOfClass("BodyPosition") then
-                local bp = Instance.new("BodyPosition")
-                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-                bp.D = 2000
-                bp.P = 50000
-                bp.Position = myRoot.Position
-                bp.Parent = myRoot
-            end
-            
-            if not myRoot:FindFirstChildOfClass("BodyGyro") then
-                local bg = Instance.new("BodyGyro")
-                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-                bg.CFrame = myRoot.CFrame
-                bg.Parent = myRoot
-            end
-        end
-        
-        print("[Alt Controller] Elevator ON.")
-        return
-    end
-    
-    -- CARPET
-    if cmdLower == "carpet" or cmdLower == "aladdin" then
-        StopAllActions()
-        ApplyModeSetup("carpet")
-        CommandLeader = Config.MainAccount
-        UpdateFollowTarget()
-        
-        -- Set up PlatformStand + BodyPosition (exactly like elevator)
-        local myCharacter = LocalPlayer.Character
-        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
-        if myRoot and myHumanoid then
-            myHumanoid.PlatformStand = true
-            
-            if not myRoot:FindFirstChildOfClass("BodyPosition") then
-                local bp = Instance.new("BodyPosition")
-                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-                bp.D = 2000
-                bp.P = 50000
-                bp.Position = myRoot.Position
-                bp.Parent = myRoot
-            end
-            
-            if not myRoot:FindFirstChildOfClass("BodyGyro") then
-                local bg = Instance.new("BodyGyro")
-                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-                bg.CFrame = myRoot.CFrame
-                bg.Parent = myRoot
-            end
-        end
-        
-        print("[Alt Controller] Carpet ON.")
-        return
-    end
-    
-
-    -- UFO
-    if cmdLower == "ufo" then
-        StopAllActions()
-        ApplyModeSetup("ufo")
-        CommandLeader = Config.MainAccount
-        UpdateFollowTarget()
-        
-        -- Set up PlatformStand + BodyPosition (exactly like carpet)
-        local myCharacter = LocalPlayer.Character
-        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
-        if myRoot and myHumanoid then
-            myHumanoid.PlatformStand = true
-            
-            if not myRoot:FindFirstChildOfClass("BodyPosition") then
-                local bp = Instance.new("BodyPosition")
-                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-                bp.D = 2000
-                bp.P = 50000
-                bp.Position = myRoot.Position
-                bp.Parent = myRoot
-            end
-            
-            if not myRoot:FindFirstChildOfClass("BodyGyro") then
-                local bg = Instance.new("BodyGyro")
-                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-                bg.CFrame = myRoot.CFrame
-                bg.Parent = myRoot
-            end
-        end
-        
-        print("[Alt Controller] UFO ON.")
-        return
-    end
-
-    -- ORBIT
-    if string.sub(cmdLower, 1, 5) == "orbit" then
-        StopAllActions()
-        ApplyModeSetup("orbit")
-        local argStr = ParseArg(6)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        
-        local myCharacter = LocalPlayer.Character
-        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
-        if myRoot and myHumanoid then
-            myHumanoid.PlatformStand = true
-            
-            if not myRoot:FindFirstChildOfClass("BodyPosition") then
-                local bp = Instance.new("BodyPosition")
-                bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-                bp.D = 2000
-                bp.P = 50000
-                bp.Position = myRoot.Position
-                bp.Parent = myRoot
-            end
-            
-            if not myRoot:FindFirstChildOfClass("BodyGyro") then
-                local bg = Instance.new("BodyGyro")
-                bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-                bg.CFrame = myRoot.CFrame
-                bg.Parent = myRoot
-            end
-        end
-        
-        print("[Alt Controller] Orbit ON -> " .. tostring(CommandLeader))
-        return
-    end
-
-    -- TORNADO
-    if string.sub(cmdLower, 1, 7) == "tornado" then
-        StopAllActions()
-        ApplyModeSetup("tornado")
-        local argStr = ParseArg(8)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        
-        -- Set up tornado physics on the humanoid
-        local myCharacter = LocalPlayer.Character
-        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
-        if myHumanoid then
-            myHumanoid.WalkSpeed = 50
-            myHumanoid.HipHeight = 0.5 -- Low enough for quick bounce-back but high enough for Jump to register
-        end
-        
-        print("[Alt Controller] Tornado ON -> " .. tostring(CommandLeader))
-        return
-    end
-
-    -- HAUNTED
-    if string.sub(cmdLower, 1, 7) == "haunted" or string.sub(cmdLower, 1, 6) == "haunt " then
-        StopAllActions()
-        ApplyModeSetup("haunted")
-        local argStr = (cmdLower:find("^haunted")) and ParseArg(8) or ParseArg(7)
-        if argStr == "" then CommandLeader = Config.MainAccount else
-            local targetPlayer = FindPlayer(argStr)
-            if targetPlayer then CommandLeader = targetPlayer.Name end
-        end
-        UpdateFollowTarget()
-        
-        -- Reset haunted state
-        hauntedPhase = "idle"
-        hauntedTimer = math.random() * 5 + 2
-        
-        print("[Alt Controller] Haunted ON -> " .. tostring(CommandLeader))
-        return
-    end
-
-    -- STRIKE (dispatched by main account with __idx suffix)
-    if string.sub(cmdLower, 1, 6) == "strike" then
-        local fullArg = ParseArg(7)
-        if fullArg ~= "" then
-            -- Parse assigned alt index from the command (format: "playername __idx2")
-            local playerName, assignedIdx = string.match(fullArg, "^(.-)%s+__idx(%d+)$")
-            if not playerName or playerName == "" then
-                -- Fallback: old format without index, default to alt 1
-                playerName = string.match(fullArg, "^(.-)%s*$") -- Trim trailing spaces
-                assignedIdx = 1
-            else
-                playerName = string.match(playerName, "^%s*(.-)%s*$") -- Trim whitespace
-                assignedIdx = tonumber(assignedIdx)
-            end
-            
-            local targetPlayer = FindPlayer(playerName)
-            local altIndexOffset = math.max(1, MyIndex - 1)
-            
-            if targetPlayer and altIndexOffset == assignedIdx then
-                ActiveStrikes[altIndexOffset] = {
-                    targetName = targetPlayer.Name,
-                    timer = 0,
-                    phase = "homing"
-                }
-                print("[Alt Controller] I am striking: " .. targetPlayer.Name)
-            end
-        end
+    -- 3. Try prefix match on first word (O(1) hash lookup)
+    local prefixHandler = PrefixCommands[firstWord]
+    if prefixHandler then
+        prefixHandler(cmd, cmdLower)
         return
     end
 
